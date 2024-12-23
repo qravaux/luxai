@@ -67,25 +67,21 @@ class Policy(nn.Module) :
         self.n_action = n_action
         self.sap_range = sap_range
 
-        self.inputs = nn.Linear(n_input,512,dtype=torch.double)
+        self.inputs = nn.Linear(n_input,1024,dtype=torch.double)
 
-        self.hidden1 = nn.Linear(512,128,dtype=torch.double)
-        self.hidden2 = nn.Linear(128,32,dtype=torch.double)
+        self.hidden1 = nn.Linear(1024,512,dtype=torch.double)
+        self.hidden2 = nn.Linear(512,128,dtype=torch.double)
 
         self.actor_action = []
         self.actor_dx = []
         self.actor_dy = []
 
-        self.critic_action = []
-        self.critic_dx = []
-        self.critic_dy = []
-
         for unit in range(self.n_units) :
-            self.actor_action.append(nn.Linear(32,self.n_action,dtype=torch.double))
-            self.actor_dx.append(nn.Linear(32,self.sap_range*2 + 1,dtype=torch.double))
-            self.actor_dy.append(nn.Linear(32,self.sap_range*2 + 1,dtype=torch.double))
+            self.actor_action.append(nn.Linear(128,self.n_action,dtype=torch.double))
+            self.actor_dx.append(nn.Linear(128,self.sap_range*2 + 1,dtype=torch.double))
+            self.actor_dy.append(nn.Linear(128,self.sap_range*2 + 1,dtype=torch.double))
 
-        self.critic = nn.Linear(32,1,dtype=torch.double)
+        self.critic = nn.Linear(128,1,dtype=torch.double)
 
     def forward(self,x) :
 
@@ -108,7 +104,7 @@ class Policy(nn.Module) :
     
 class Luxai_Worker(mp.Process) :
 
-    def __init__(self, worker_id, shared_queue, policy, victory_bonus=0) :
+    def __init__(self, worker_id, shared_queue, policy_0, policy_1, victory_bonus=0) :
         super(Luxai_Worker, self).__init__()
 
         self.env = LuxAIS3GymEnv(numpy_output=True)
@@ -120,7 +116,8 @@ class Luxai_Worker(mp.Process) :
         self.victory_bonus = victory_bonus
         self.n_inputs = 1880
         self.n_action = 6
-        self.policy = policy
+        self.policy_0 = policy_0
+        self.policy_1 = policy_1
         self.shared_queue = shared_queue
         self.worker_id = worker_id
 
@@ -136,15 +133,15 @@ class Luxai_Worker(mp.Process) :
             base_reward_0 = 0
             base_reward_1 = 0
 
-            cumulated_rewards = torch.zeros(self.len_episode,2,dtype=torch.double)
-            states = torch.zeros(self.len_episode,2,self.n_inputs,dtype=torch.double)
-            actions = torch.zeros(self.len_episode,2,self.n_units,3,dtype=torch.int)
+            cumulated_rewards = torch.zeros(2,self.len_episode,dtype=torch.double)
+            states = torch.zeros(2,self.len_episode,self.n_inputs,dtype=torch.double)
+            actions = torch.zeros(2,self.len_episode,self.n_units,3,dtype=torch.int)
 
             for step in range(self.len_episode):
 
                 #Compute actions probabilities and values
-                actor_action_0, actor_dx_0, actor_dy_0, value_0 = self.policy(state_0)
-                actor_action_1, actor_dx_1, actor_dy_1, value_1 = self.policy(state_1)
+                actor_action_0, actor_dx_0, actor_dy_0, value_0 = self.policy_0(state_0)
+                actor_action_1, actor_dx_1, actor_dy_1, value_1 = self.policy_1(state_1)
 
                 # Sample actions based on probabilities
                 action_0 = sample_action(actor_action_0, actor_dx_0, actor_dy_0, self.n_units, self.sap_range)
@@ -162,8 +159,8 @@ class Luxai_Worker(mp.Process) :
                     reward_memory = reward
 
                 if reward['player_0'] > reward_memory['player_0'] or reward['player_1'] > reward_memory['player_1'] :
-                    base_reward_0 = cumulated_rewards[step-1,0]
-                    base_reward_1 = cumulated_rewards[step-1,1]
+                    base_reward_0 = cumulated_rewards[0,step-1]
+                    base_reward_1 = cumulated_rewards[1,step-1]
 
                     if reward['player_0'] > reward_memory['player_0'] :
                         base_reward_0 += self.victory_bonus
@@ -171,20 +168,22 @@ class Luxai_Worker(mp.Process) :
                         base_reward_1 += self.victory_bonus
                     reward_memory = reward
                 
-                cumulated_rewards[step,0] = obs['player_0']['team_points'][0] + base_reward_0
-                cumulated_rewards[step,1] = obs['player_1']['team_points'][1] + base_reward_1
+                cumulated_rewards[0,step] = obs['player_0']['team_points'][0] + base_reward_0
+                cumulated_rewards[1,step] = obs['player_1']['team_points'][1] + base_reward_1
                 
-                states[step,0] = state_0
-                states[step,1] = state_1
+                states[0,step] = state_0
+                states[1,step] = state_1
 
-                actions[step,0] = action_0
-                actions[step,1] = action_1
+                actions[0,step] = action_0
+                actions[1,step] = action_1
 
                 state_0 = next_state_0
                 state_1 = next_state_1
 
-            rewards = cumulated_rewards - torch.cat((torch.zeros(1,2),cumulated_rewards[:-1]))
-            self.shared_queue.put((states.detach(),actions.detach(),rewards.detach(),cumulated_rewards[-1].detach()))
+            rewards_0 = cumulated_rewards[0] - torch.cat((torch.zeros(1),cumulated_rewards[0,:-1]))
+            rewards_1 = cumulated_rewards[1] - torch.cat((torch.zeros(1),cumulated_rewards[1,:-1]))
+
+            self.shared_queue.put((states.detach(),actions.detach(),torch.stack((rewards_0,rewards_1)).detach(),cumulated_rewards[:,-1].detach()))
 
 if __name__ == "__main__":
 
@@ -210,20 +209,25 @@ if __name__ == "__main__":
     len_episode = match_step * env.env_params.match_count_per_episode
     n_action = 6
     n_input = 1880
+    victory_bonus = 0
     step_cpt = 0
     
     writer = SummaryWriter("runs/experiment_1")
 
-    model = Policy(n_input, n_action, n_units, sap_range=sap_range)
-    model.share_memory()  # For multiprocessing, the model parameters must be shared
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    model_0 = Policy(n_input, n_action, n_units, sap_range=sap_range)
+    model_0.share_memory()  # For multiprocessing, the model parameters must be shared
+    optimizer_0 = torch.optim.Adam(model_0.parameters(), lr=lr)
+
+    model_1 = Policy(n_input, n_action, n_units, sap_range=sap_range)
+    model_1.share_memory()  # For multiprocessing, the model parameters must be shared
+    optimizer_1 = torch.optim.Adam(model_1.parameters(), lr=lr)
 
     shared_queue = mp.Queue()  # Queue to share data between workers and the main process
 
     print('Instantiate workers...')
     workers = []
     for i in range(num_workers):
-        worker = Luxai_Worker(i, shared_queue, model)
+        worker = Luxai_Worker(i, shared_queue, model_0, model_1, victory_bonus)
         workers.append(worker)
         worker.start()
     print('Done\n')
@@ -233,79 +237,119 @@ if __name__ == "__main__":
     for epoch in range(n_epochs):
 
         # Collect data from workers
-        experiences = []
+        experiences_0 = []
+        experiences_1 = []
+
         for _ in range(n_episode):
 
             states, actions, rewards, cumulated_rewards = shared_queue.get()
 
             #Compute log_probs and values
+            actor_action_0, actor_dx_0, actor_dy_0, values_0 = model_0(states[0])
+            log_probs_0 = compute_log_prob(actor_action_0, actor_dx_0, actor_dy_0, actions[0])
 
-            actor_action, actor_dx, actor_dy, values = model(states.flatten(0,1))
-            log_probs = compute_log_prob(actor_action, actor_dx, actor_dy, actions.flatten(0,1))
+            actor_action_1, actor_dx_1, actor_dy_1, values_1 = model_1(states[1])
+            log_probs_1 = compute_log_prob(actor_action_1, actor_dx_1, actor_dy_1, actions[1])
 
             # Advantage computation
-            values = values.view(len_episode,2)
-            advantages = torch.zeros(len_episode,2)
+            advantages_0 = torch.zeros(len_episode,1)
+            advantages_1 = torch.zeros(len_episode,1)
             
-            last_gae_lam = torch.zeros(2)
+            last_gae_lam_0 = 0
+            last_gae_lam_1 = 0
+
             for step in reversed(range(len_episode)):
 
                 if step == len_episode - 1 :
-                    next_values = values[-1]
+                    next_values_0 = values_0[-1]
+                    next_values_1 = values_1[-1]
                 else:
-                    next_values = values[step + 1]
+                    next_values_0 = values_0[step + 1]
+                    next_values_1 = values_1[step + 1]
 
-                delta = rewards[step] + gamma * next_values - values[step]
-                last_gae_lam = delta + gamma * gae_lambda * last_gae_lam
-                advantages[step] = last_gae_lam
+                delta_0 = rewards[0,step] + gamma * next_values_0 - values_0[step]
+                delta_1 = rewards[1,step] + gamma * next_values_1 - values_1[step]
 
-            returns = advantages + values  
-            returns = returns.flatten(0,1)
-            advantages = advantages.flatten(0,1)
-            values = values.flatten(0,1)
+                last_gae_lam_0 = delta_0 + gamma * gae_lambda * last_gae_lam_0
+                last_gae_lam_1 = delta_1 + gamma * gae_lambda * last_gae_lam_1
 
-            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+                advantages_0[step] = last_gae_lam_0
+                advantages_1[step] = last_gae_lam_1
 
-            experiences.append((values, log_probs, advantages, returns, cumulated_rewards))
+            returns_0 = advantages_0 + values_0
+            returns_1 = advantages_1 + values_1
+
+            advantages_0 = (advantages_0 - advantages_0.mean()) / (advantages_0.std() + 1e-8)
+            advantages_1 = (advantages_1 - advantages_1.mean()) / (advantages_1.std() + 1e-8)
+
+            experiences_0.append((values_0, log_probs_0, advantages_0, returns_0, cumulated_rewards[0]))
+            experiences_1.append((values_1, log_probs_1, advantages_1, returns_1, cumulated_rewards[1]))
 
         # Process the collected experiences
-        values, log_probs, advantages, returns, cumulated_rewards = zip(*experiences)
+        values_0, log_probs_0, advantages_0, returns_0, cumulated_rewards_0 = zip(*experiences_0)
+        values_1, log_probs_1, advantages_1, returns_1, cumulated_rewards_1 = zip(*experiences_1)
 
-        values = torch.cat(values,dim=0)
-        log_probs = torch.cat(log_probs,dim=0)
-        advantages = torch.cat(advantages,dim=0)
-        returns = torch.cat(returns,dim=0)
-        cumulated_rewards = torch.stack(cumulated_rewards).type(torch.DoubleTensor)
+        values_0 = torch.cat(values_0,dim=0)
+        log_probs_0 = torch.cat(log_probs_0,dim=0)
+        advantages_0 = torch.cat(advantages_0,dim=0)
+        returns_0 = torch.cat(returns_0,dim=0)
+        cumulated_rewards_0 = torch.stack(cumulated_rewards_0).type(torch.DoubleTensor)
+
+        values_1 = torch.cat(values_1,dim=0)
+        log_probs_1 = torch.cat(log_probs_1,dim=0)
+        advantages_1 = torch.cat(advantages_1,dim=0)
+        returns_1 = torch.cat(returns_1,dim=0)
+        cumulated_rewards_1 = torch.stack(cumulated_rewards_1).type(torch.DoubleTensor)
 
         # Losses
+        entropy_loss_0 = -torch.mean(torch.exp(log_probs_0) * log_probs_0)
+        policy_loss_0 = -torch.mean(log_probs_0 * advantages_0)
+        value_loss_0 = F.mse_loss(values_0, returns_0)
 
-        entropy_loss = -torch.mean(torch.exp(log_probs) * log_probs)
-        policy_loss = -torch.mean(log_probs * advantages)
-        value_loss = F.mse_loss(values, returns)
+        loss_0 = policy_loss_0 + vf_coef *value_loss_0 + entropy_coef * entropy_loss_0
 
-        loss = policy_loss + vf_coef *value_loss + entropy_coef * entropy_loss
+        entropy_loss_1 = -torch.mean(torch.exp(log_probs_1) * log_probs_1)
+        policy_loss_1 = -torch.mean(log_probs_1 * advantages_1)
+        value_loss_1 = F.mse_loss(values_1, returns_1)
+
+        loss_1 = policy_loss_1 + vf_coef *value_loss_1 + entropy_coef * entropy_loss_1
 
         # Update model
-        optimizer.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_norm)
-        optimizer.step()
+        optimizer_0.zero_grad()
+        loss_0.backward()
+        torch.nn.utils.clip_grad_norm_(model_0.parameters(), max_norm=max_norm)
+        optimizer_0.step()
+
+        optimizer_1.zero_grad()
+        loss_1.backward()
+        torch.nn.utils.clip_grad_norm_(model_1.parameters(), max_norm=max_norm)
+        optimizer_1.step()
 
         step_cpt += len_episode*n_episode
 
-        writer.add_scalar("Loss/Total Loss", loss.item(), step_cpt)
-        writer.add_scalar("Loss/Policy Loss", policy_loss.item(), step_cpt)
-        writer.add_scalar("Loss/Value Loss", value_loss.item(), step_cpt)
-        writer.add_scalar("Loss/Entropy Loss", entropy_loss.item(), step_cpt)
-        
-        writer.add_scalar("Reward agent 0", torch.mean(cumulated_rewards[:,0]).item(), step_cpt)
-        writer.add_scalar("Reward agent 1", torch.mean(cumulated_rewards[:,1]).item(), step_cpt)
+        writer.add_scalar("Reward agent 0", torch.mean(cumulated_rewards_0).item(), step_cpt)
+        writer.add_scalar("Reward agent 1", torch.mean(cumulated_rewards_1).item(), step_cpt)
 
-        print(f"Episode {epoch}, Loss: {loss.item()}, Reward_0 : {torch.mean(cumulated_rewards[:,0]).item()}, Reward_1 : {torch.mean(cumulated_rewards[:,1]).item()}")
+        writer.add_scalar("Loss/Total Loss 0", loss_0.item(), step_cpt)
+        writer.add_scalar("Loss/Total Loss 1", loss_1.item(), step_cpt)
+
+        writer.add_scalar("Loss/Policy Loss 0", policy_loss_0.item(), step_cpt)
+        writer.add_scalar("Loss/Policy Loss 1", policy_loss_1.item(), step_cpt)
+
+        writer.add_scalar("Loss/Value Loss 0", value_loss_0.item(), step_cpt)
+        writer.add_scalar("Loss/Value Loss 1", value_loss_1.item(), step_cpt)
+
+        writer.add_scalar("Loss/Entropy Loss 0", entropy_loss_0.item(), step_cpt)
+        writer.add_scalar("Loss/Entropy Loss 1", entropy_loss_1.item(), step_cpt)
+
+        print(f"Episode {epoch}, Loss 0 : {loss_0.item()}, Loss 1 : {loss_1.item()}, Reward_0 : {torch.mean(cumulated_rewards_0).item()}, Reward_1 : {torch.mean(cumulated_rewards_1).item()}")
 
         if epoch % save_rate == 0:
-            save_path = os.path.join(save_dir, f"policy_epoch_{epoch}.pth")
-            torch.save(model.state_dict(), save_path)
+            save_path = os.path.join(save_dir, f"policy_0_epoch_{epoch}.pth")
+            torch.save(model_0.state_dict(), save_path)
+
+            save_path = os.path.join(save_dir, f"policy_1_epoch_{epoch}.pth")
+            torch.save(model_1.state_dict(), save_path)
 
     # Terminate workers
     for worker in workers:
