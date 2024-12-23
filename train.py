@@ -1,4 +1,5 @@
 from src.luxai_s3.wrappers import LuxAIS3GymEnv
+import os
 import torch.nn as nn
 import torch.nn.functional as F
 import torch
@@ -7,7 +8,7 @@ import numpy as np
 from torch.distributions import Categorical
 from torch.utils.tensorboard import SummaryWriter
 
-def obs_to_state(obs) :
+def obs_to_state(obs:dict) -> torch.Tensor:
 
     n_units = len(obs['units']['position'][0])
     list_state = []
@@ -34,11 +35,17 @@ def obs_to_state(obs) :
     
     return torch.cat(list_state)
 
-def compute_log_prob(actor_action, actor_dx, actor_dy, action, n_units):
+def compute_log_prob(actor_action, actor_dx, actor_dy, action):
+    batch_size = actor_action.size(0)
+    n_units = actor_action.size(1)
+
+    step_indices = torch.arange(batch_size).unsqueeze(1).expand(-1, n_units)
+    unit_indices = torch.arange(n_units).unsqueeze(0).expand(batch_size, -1) 
+
     # Computing log probabilities for the actions
-    log_prob = torch.sum(actor_action[:,torch.arange(n_units), action[:,:, 0]],axis=1)
-    log_prob += torch.sum(actor_dx[:,torch.arange(n_units), action[:,:, 1]],axis=1)
-    log_prob += torch.sum(actor_dy[:,torch.arange(n_units), action[:,:, 2]],axis=1)
+    log_prob = torch.sum(actor_action[step_indices,unit_indices, action[:,:, 0]],axis=1)
+    log_prob += torch.sum(actor_dx[step_indices,unit_indices, action[:,:, 1]],axis=1)
+    log_prob += torch.sum(actor_dy[step_indices,unit_indices, action[:,:, 2]],axis=1)
     return log_prob
 
 def sample_action(actor_action, actor_dx, actor_dy, n_units, sap_range):
@@ -131,7 +138,7 @@ class Luxai_Worker(mp.Process) :
 
             cumulated_rewards = torch.zeros(self.len_episode,2,dtype=torch.double)
             states = torch.zeros(self.len_episode,2,self.n_inputs,dtype=torch.double)
-            actions = torch.zeros(self.len_episode,2,self.n_units,3,dtype=torch.double)
+            actions = torch.zeros(self.len_episode,2,self.n_units,3,dtype=torch.int)
 
             for step in range(self.len_episode):
 
@@ -177,21 +184,33 @@ class Luxai_Worker(mp.Process) :
                 state_1 = next_state_1
 
             rewards = cumulated_rewards - torch.cat((torch.zeros(1,2),cumulated_rewards[:-1]))
-            self.shared_queue.put((states.detach(),actions.detach(),rewards.detach()))
+            self.shared_queue.put((states.detach(),actions.detach(),rewards.detach(),cumulated_rewards[-1].detach()))
 
 if __name__ == "__main__":
+
+    print('Initialise training environment...\n')
     lr = 1e-5
-    n_epochs = int(1e6)
-    batch_size = 2
+    batch_size = 101
     max_norm = 0.5
     entropy_coef = 0.01
-    n_input = 1880
+    vf_coef = 0.5
     gamma = 0.99
     gae_lambda = 0.95
+    save_dir = "policy"
+    save_rate = 50
+
+    n_epochs = int(1e6)
+    num_workers = 4
+    n_episode = num_workers
+     
     env = LuxAIS3GymEnv(numpy_output=True)
     n_units = env.env_params.max_units
     sap_range = env.env_params.unit_sap_range
+    match_step = env.env_params.max_steps_in_match + 1
+    len_episode = match_step * env.env_params.match_count_per_episode
     n_action = 6
+    n_input = 1880
+    step_cpt = 0
     
     writer = SummaryWriter("runs/experiment_1")
 
@@ -200,69 +219,71 @@ if __name__ == "__main__":
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
     shared_queue = mp.Queue()  # Queue to share data between workers and the main process
-    num_workers = 4  # Number of worker processes
 
+    print('Instantiate workers...')
     workers = []
     for i in range(num_workers):
         worker = Luxai_Worker(i, shared_queue, model)
         workers.append(worker)
         worker.start()
-
+    print('Done\n')
+    
     # Main training loop: Collect experiences from workers and update the model
+    print('Start training...\n')
     for epoch in range(n_epochs):
 
         # Collect data from workers
         experiences = []
-        for _ in range(batch_size):
-            states, actions, rewards = shared_queue.get()
-            experiences.append((states, actions, rewards))
+        for _ in range(n_episode):
+
+            states, actions, rewards, cumulated_rewards = shared_queue.get()
+
+            #Compute log_probs and values
+
+            actor_action, actor_dx, actor_dy, values = model(states.flatten(0,1))
+            log_probs = compute_log_prob(actor_action, actor_dx, actor_dy, actions.flatten(0,1))
+
+            # Advantage computation
+            values = values.view(len_episode,2)
+            advantages = torch.zeros(len_episode,2)
+            
+            last_gae_lam = torch.zeros(2)
+            for step in reversed(range(len_episode)):
+
+                if step == len_episode - 1 :
+                    next_values = values[-1]
+                else:
+                    next_values = values[step + 1]
+
+                delta = rewards[step] + gamma * next_values - values[step]
+                last_gae_lam = delta + gamma * gae_lambda * last_gae_lam
+                advantages[step] = last_gae_lam
+
+            returns = advantages + values  
+            returns = returns.flatten(0,1)
+            advantages = advantages.flatten(0,1)
+            values = values.flatten(0,1)
+
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
+            experiences.append((values, log_probs, advantages, returns, cumulated_rewards))
 
         # Process the collected experiences
-        states, actions, rewards = zip(*experiences)
+        values, log_probs, advantages, returns, cumulated_rewards = zip(*experiences)
 
-        states = torch.stack(states).flatten(0,1)
-        actions = torch.stack(actions).to(torch.int).flatten(0,1)
-        rewards = torch.stack(rewards)
-
-        #Compute log_probs and values
-
-        actor_action, actor_dx, actor_dy, values = model(states)
-        log_probs = compute_log_prob(actor_action, actor_dx, actor_dy, actions, n_units)
-
-        # Advantage computation
-
-        values = values.view(batch_size,2)
-        advantages = torch.zeros(batch_size,2)
-
-        for step in reversed(range(batch_size)):
-
-            if step == batch_size - 1 :
-                next_values = values[-1]
-            else:
-                next_values = values[step + 1]
-
-            delta = rewards[step] + gamma * next_values - values[step]
-            last_gae_lam = delta + gamma * gae_lambda * last_gae_lam
-            advantages[step] = last_gae_lam
-
-        returns = advantages + values      
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-
-        returns = returns.flatten(0,1)
-        advantages = advantages.flatten(0,1)
-        values = values.flatten(0,1)
-
-        probs = torch.exp(log_probs)
-        entropy_loss = -torch.sum(probs * log_probs)
+        values = torch.cat(values,dim=0)
+        log_probs = torch.cat(log_probs,dim=0)
+        advantages = torch.cat(advantages,dim=0)
+        returns = torch.cat(returns,dim=0)
+        cumulated_rewards = torch.stack(cumulated_rewards).type(torch.DoubleTensor)
 
         # Losses
-        print(torch.mean(advantages),torch.mean(log_probs))
 
+        entropy_loss = -torch.mean(torch.exp(log_probs) * log_probs)
         policy_loss = -torch.mean(log_probs * advantages)
         value_loss = F.mse_loss(values, returns)
 
-        print(policy_loss,value_loss,entropy_loss)
-        loss = policy_loss + value_loss - entropy_coef * entropy_loss.mean()
+        loss = policy_loss + vf_coef *value_loss + entropy_coef * entropy_loss
 
         # Update model
         optimizer.zero_grad()
@@ -270,14 +291,21 @@ if __name__ == "__main__":
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_norm)
         optimizer.step()
 
-        writer.add_scalar("Loss/Policy Loss", policy_loss.item(), epoch)
-        writer.add_scalar("Loss/Value Loss", value_loss.item(), epoch)
-        writer.add_scalar("Loss/Total Loss", loss.item(), epoch)
+        step_cpt += len_episode*n_episode
 
-        avg_reward = rewards.mean().item()
-        writer.add_scalar("Reward/Avg Reward", avg_reward, epoch)
+        writer.add_scalar("Loss/Total Loss", loss.item(), step_cpt)
+        writer.add_scalar("Loss/Policy Loss", policy_loss.item(), step_cpt)
+        writer.add_scalar("Loss/Value Loss", value_loss.item(), step_cpt)
+        writer.add_scalar("Loss/Entropy Loss", entropy_loss.item(), step_cpt)
+        
+        writer.add_scalar("Reward agent 0", torch.mean(cumulated_rewards[:,0]).item(), step_cpt)
+        writer.add_scalar("Reward agent 1", torch.mean(cumulated_rewards[:,1]).item(), step_cpt)
 
-        print(f"Episode {epoch}, Loss: {loss.item()}")
+        print(f"Episode {epoch}, Loss: {loss.item()}, Reward_0 : {torch.mean(cumulated_rewards[:,0]).item()}, Reward_1 : {torch.mean(cumulated_rewards[:,1]).item()}")
+
+        if epoch % save_rate == 0:
+            save_path = os.path.join(save_dir, f"policy_epoch_{epoch}.pth")
+            torch.save(model.state_dict(), save_path)
 
     # Terminate workers
     for worker in workers:
