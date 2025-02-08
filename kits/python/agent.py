@@ -1,6 +1,13 @@
 from lux.utils import direction_to
 import sys
+sys.path.append('../../')
 import numpy as np
+from train import Policy, obs_to_state, sample_action
+import torch
+import flax.serialization
+from luxai_s3.utils import to_numpy
+
+
 class Agent():
     def __init__(self, player: str, env_cfg) -> None:
         self.player = player
@@ -14,10 +21,37 @@ class Agent():
         self.discovered_relic_nodes_ids = set()
         self.unit_explore_locations = dict()
 
+        n_action = 6
+        n_input = 1880
+        self.n_units = 16
+        self.sap_range = 4
+
+        self.policy_0 = Policy(n_input,n_action,self.n_units,self.sap_range)
+        self.policy_1 = Policy(n_input,n_action,self.n_units,self.sap_range)
+
+        self.policy_0.load_state_dict(torch.load("../../policy/policy_0_epoch_0.pth", weights_only=True))
+        self.policy_1.load_state_dict(torch.load("../../policy/policy_1_epoch_0.pth", weights_only=True))
+
     def act(self, step: int, obs, remainingOverageTime: int = 60):
-        """implement this function to decide what actions to send to each available unit. 
-        
-        step is the current timestep number of the game starting from 0 going up to max_steps_in_match * match_count_per_episode - 1.
+
+        obs = to_numpy(flax.serialization.to_state_dict(obs))
+
+        state_0 = obs_to_state(obs)
+        state_1 = obs_to_state(obs)
+
+        #Compute actions probabilities and values
+        actor_action_0, actor_dx_0, actor_dy_0, value_0 = self.policy_0(state_0)
+        actor_action_1, actor_dx_1, actor_dy_1, value_1 = self.policy_1(state_1)
+
+        # Sample actions based on probabilities
+        action_0 = sample_action(actor_action_0, actor_dx_0, actor_dy_0, self.n_units, self.sap_range)
+        action_1 = sample_action(actor_action_1, actor_dx_1, actor_dy_1, self.n_units, self.sap_range)
+
+        if self.player == "player_0" :
+            return action_0
+        else :
+            return action_1
+
         """
         unit_mask = np.array(obs["units_mask"][self.team_id]) # shape (max_units, )
         unit_positions = np.array(obs["units"]["position"][self.team_id]) # shape (max_units, 2)
@@ -66,4 +100,7 @@ class Agent():
                     rand_loc = (np.random.randint(0, self.env_cfg["map_width"]), np.random.randint(0, self.env_cfg["map_height"]))
                     self.unit_explore_locations[unit_id] = rand_loc
                 actions[unit_id] = [direction_to(unit_pos, self.unit_explore_locations[unit_id]), 0, 0]
+
         return actions
+        """
+        
