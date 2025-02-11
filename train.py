@@ -10,35 +10,36 @@ from torch.distributions import Categorical
 from torch.utils.tensorboard import SummaryWriter
 
 def obs_to_state(obs:dict) -> torch.Tensor:
-    list_state = []
+    list_state_features = []
+
+    state_maps = torch.zeros(3,24,24)
+    
+    state_maps[0] = torch.from_numpy(obs['map_features']['energy'].astype(float)) #map_energy
+    state_maps[1] = torch.from_numpy(obs['sensor_mask'].astype(float)) #sensor_mask
+    state_maps[2] = torch.from_numpy(obs['map_features']['tile_type'].astype(float)) #map_tile_type
 
     #Units
-    list_state.append(torch.from_numpy(obs['units']['position'].astype(float)).flatten()/24) #position
-    list_state.append(torch.from_numpy(obs['units']['energy'].astype(float)).flatten()/400) #energy
-    list_state.append(torch.from_numpy(obs['units_mask'].astype(float)).flatten()) #unit_mask
-    
-    #Map
-    list_state.append(torch.from_numpy(obs['sensor_mask'].astype(float)).flatten()) #sensor_mask
-    list_state.append(torch.from_numpy(obs['map_features']['energy'].astype(float)).flatten()) #map_energy
-    list_state.append(torch.from_numpy(obs['map_features']['tile_type'].astype(float)).flatten()) #map_tile_type
+    list_state_features.append(torch.from_numpy(obs['units']['position'].astype(float)).flatten()/24) #position
+    list_state_features.append(torch.from_numpy(obs['units']['energy'].astype(float)).flatten()/400) #energy
+    list_state_features.append(torch.from_numpy(obs['units_mask'].astype(float)).flatten()) #unit_mask
 
-    list_state.append(torch.from_numpy(obs['relic_nodes'].astype(float)).flatten()) #relic_nodes
-    list_state.append(torch.from_numpy(obs['relic_nodes_mask'].astype(float)).flatten()) #relic_nodes_mask
+    list_state_features.append(torch.from_numpy(obs['relic_nodes'].astype(float)).flatten()) #relic_nodes
+    list_state_features.append(torch.from_numpy(obs['relic_nodes_mask'].astype(float)).flatten()) #relic_nodes_mask
 
     #Game
-    list_state.append(torch.from_numpy(obs['team_points'].astype(float)).flatten()/3000) #team_points
-    list_state.append(torch.from_numpy(obs['team_wins'].astype(float)).flatten()/5) #team_wins
+    list_state_features.append(torch.from_numpy(obs['team_points'].astype(float)).flatten()/3000) #team_points
+    list_state_features.append(torch.from_numpy(obs['team_wins'].astype(float)).flatten()/5) #team_wins
 
-    list_state.append(torch.from_numpy(obs['steps'].astype(float)).flatten()/100) #steps
-    list_state.append(torch.from_numpy(obs['match_steps'].astype(float)).flatten()/5) #match_steps
+    list_state_features.append(torch.from_numpy(obs['steps'].astype(float)).flatten()/100) #steps
+    list_state_features.append(torch.from_numpy(obs['match_steps'].astype(float)).flatten()/5) #match_steps
     
-    state = torch.cat(list_state)
+    state = {'features':torch.cat(list_state_features),'maps':state_maps}
 
     return state
 
 class Policy(nn.Module) :
 
-    def __init__(self,n_input,n_action,env_param,player) :
+    def __init__(self,state,n_action,env_param,player) :
 
         super(Policy,self).__init__()
 
@@ -53,18 +54,36 @@ class Policy(nn.Module) :
         self.unit_move_cost = env_param.unit_move_cost
         self.unit_sap_cost = env_param.unit_sap_cost
 
-        self.feature_size = 64
-        self.network_size = [1024,512]
+        self.network_size = [1024,512,64]
+        self.cnn_channels = [9,27,9]
+        self.cnn_kernels = [9,6,3]
+        
+        self.n_input_maps = state['maps'].size(0)
 
+        self.cnn_inputs = nn.Conv2d(self.n_input_maps,
+                                    self.cnn_size[0],
+                                    kernel_size=self.cnn_kernels[0],
+                                    padding=self.cnn_kernels[0]-1)
+        
+        self.cnn_hidden = [nn.Conv2d(self.cnn_size[i-1],
+                                     self.cnn_size[i],
+                                     kernel_size=self.cnn_kernels[i],
+                                     padding=self.cnn_kernels[i]-1) for i in range(1,len(self.cnn_channels)-1)]
+        
+        with torch.no_grad :
+            x = self.cnn_inputs(state["maps"])
+            for layer in self.cnn_hidden :
+                x = layer(x)
+                self.n_input_features = x.flatten().size() + state['features'].size(0)
+        
+        self.inputs = nn.Linear(self.n_input_features,self.network_size[0],dtype=torch.double)
         self.hidden = [nn.Linear(self.network_size[i],self.network_size[i+1],dtype=torch.double) for i in range(len(self.network_size)-1)]
-        self.inputs = nn.Linear(n_input,self.network_size[0],dtype=torch.double)
-        self.outputs = nn.Linear(self.network_size[-1],self.feature_size,dtype=torch.double)
 
-        self.actor_action = nn.Linear(self.feature_size,self.n_action*self.n_units,dtype=torch.double)
-        self.actor_dx = nn.Linear(self.feature_size,(self.sap_range*2+1)*self.n_units,dtype=torch.double)
-        self.actor_dy = nn.Linear(self.feature_size,(self.sap_range*2+1)*self.n_units,dtype=torch.double)
+        self.actor_action = nn.Linear(self.network_size[-1],self.n_action*self.n_units,dtype=torch.double)
+        self.actor_dx = nn.Linear(self.network_size[-1],(self.sap_range*2+1)*self.n_units,dtype=torch.double)
+        self.actor_dy = nn.Linear(self.network_size[-1],(self.sap_range*2+1)*self.n_units,dtype=torch.double)
 
-        self.critic = nn.Linear(self.feature_size,1,dtype=torch.double)
+        self.critic = nn.Linear(self.network_size[-1],1,dtype=torch.double)
 
     def training_forward(self,x,action,mask_action,mask_dx,mask_dy) :
 
@@ -120,12 +139,12 @@ class Policy(nn.Module) :
         mask_action[torch.where(energy_mask)[0],1:] += 1
         mask_action[torch.where(sap_mask)[0],-1] += 1
 
-        directions = torch.tensor([[0,-1],[1,0],[0,1],[-1,0],]).view(4,2)
+        directions = torch.tensor([[0,-1],[1,0],[0,1],[-1,0]]).view(4,2)
         target_tiles = state['units'].unsqueeze(1).expand(self.n_units, 4, 2) + directions
         clamp_target_tiles = torch.clamp(target_tiles,0,23).view(self.n_units*4,2)
         target_tiles_type = state['map'][clamp_target_tiles[:,0],clamp_target_tiles[:,1]].view(self.n_units,4)
 
-        correct_move_direction = (((target_tiles >= 0) & (target_tiles <= 23)).all(dim=-1)) & (target_tiles_type != 1)
+        correct_move_direction = (((target_tiles >= 0) & (target_tiles <= 23)).all(dim=-1)) & (target_tiles_type != 2)
         forbidden_move = 1 - correct_move_direction.int() 
         mask_action[:,1:-1] += forbidden_move
         
@@ -166,6 +185,10 @@ class Luxai_Worker(mp.Process) :
         self.env = LuxAIS3GymEnv(numpy_output=True)
         self.n_units = self.env.env_params.max_units
         self.sap_range = self.env.env_params.unit_sap_range
+        self.max_unit_energy = self.env.env_params.max_unit_energy
+        self.map_width = self.env.env_params.map_width
+        self.map_height = self.env.env_params.map_height
+        self.max_relic_nodes = self.env.env_params.max_relic_nodes
         self.match_step = self.env.env_params.max_steps_in_match + 1
         self.len_episode = self.match_step * self.env.env_params.match_count_per_episode
         self.gamma = gamma
@@ -210,7 +233,16 @@ class Luxai_Worker(mp.Process) :
                 state_1 = obs_to_state(obs['player_1'])
                 previous_obs = obs
                 
-                cumulated_reward = np.zeros(2)
+                cumulated_reward = torch.zeros(2)
+
+                map_0 = torch.zeros(self.map_width,self.map_height)
+                map_1 = torch.zeros(self.map_width,self.map_height)
+
+                energy_0 = torch.zeros(self.n_units,1)
+                energy_1 = torch.zeros(self.n_units,1)
+
+                enemy_0 = torch.zeros(self.n_units,1)
+                enemy_1 = torch.zeros(self.n_units,1)
 
                 for ep_step in range(self.len_episode):
 
@@ -276,25 +308,48 @@ class Luxai_Worker(mp.Process) :
                     if ep_step == 0 :
                         episode_start[step_cpt] = 1
                         reward_memory = reward
-                        rewards[0,step_cpt] = obs['player_0']['team_points'][0]
-                        rewards[1,step_cpt] = obs['player_1']['team_points'][1]
+                        rewards[0,step_cpt] += obs['player_0']['team_points'][0]
+                        rewards[1,step_cpt] += obs['player_1']['team_points'][1]
 
                     elif reward['player_0'] > reward_memory['player_0'] :
                         reward_memory = reward
-                        rewards[0,step_cpt] = obs['player_0']['team_points'][0] + self.victory_bonus
-                        rewards[1,step_cpt] = obs['player_1']['team_points'][1]
+                        rewards[0,step_cpt] += obs['player_0']['team_points'][0] + self.victory_bonus
+                        rewards[1,step_cpt] += obs['player_1']['team_points'][1]
 
                     elif reward['player_1'] > reward_memory['player_1'] :
                         reward_memory = reward
-                        rewards[0,step_cpt] = obs['player_0']['team_points'][0]
-                        rewards[1,step_cpt] = obs['player_1']['team_points'][1] + self.victory_bonus
+                        rewards[0,step_cpt] += obs['player_0']['team_points'][0]
+                        rewards[1,step_cpt] += obs['player_1']['team_points'][1] + self.victory_bonus
 
                     else :
-                        rewards[0,step_cpt] = obs['player_0']['team_points'][0] - previous_obs['player_0']['team_points'][0]
-                        rewards[1,step_cpt] = obs['player_1']['team_points'][1] - previous_obs['player_1']['team_points'][1]
+                        rewards[0,step_cpt] += obs['player_0']['team_points'][0] - previous_obs['player_0']['team_points'][0]
+                        rewards[1,step_cpt] += obs['player_1']['team_points'][1] - previous_obs['player_1']['team_points'][1]
 
-                    rewards[0,step_cpt] = torch.sum(torch.from_numpy(obs['player_0']['sensor_mask'].astype(float))) / 576
-                    rewards[1,step_cpt] = torch.sum(torch.from_numpy(obs['player_1']['sensor_mask'].astype(float))) / 576
+                    new_map_0 = torch.clamp_max(map_0 + torch.from_numpy(obs['player_0']['sensor_mask'].astype(float)),1)
+                    new_map_1 = torch.clamp_max(map_1 + torch.from_numpy(obs['player_1']['sensor_mask'].astype(float)),1)
+                    new_energy_0 = torch.from_numpy(obs['player_0']['units']['energy'][0].astype(float))
+                    new_energy_1 = torch.from_numpy(obs['player_1']['units']['energy'][1].astype(float))
+                    new_enemy_0 = torch.from_numpy(obs['player_0']['units']['units_mask'][1].astype(float))
+                    new_enemy_1 = torch.from_numpy(obs['player_1']['units']['units_mask'][0].astype(float))
+
+                    rewards[0,step_cpt] += torch.sum(new_map_0-map_0) / (self.map_width*self.map_height)
+                    rewards[1,step_cpt] += torch.sum(new_map_1-map_1) / (self.map_width*self.map_height)
+
+                    rewards[0,step_cpt] += torch.sum(new_energy_0-energy_0) / (self.max_unit_energy*self.n_units)
+                    rewards[1,step_cpt] += torch.sum(new_energy_1-energy_1) / (self.max_unit_energy*self.n_units)
+
+                    rewards[0,step_cpt] -= torch.sum(new_energy_1*new_enemy_0 - energy_1*enemy_0) / (self.max_unit_energy*self.n_units)
+                    rewards[1,step_cpt] -= torch.sum(new_energy_0*new_enemy_1 - energy_0*enemy_1) / (self.max_unit_energy*self.n_units)
+
+                    rewards[0,step_cpt] += torch.sum(torch.from_numpy(obs['player_0']['relic_nodes_mask'].astype(float))) / (self.max_relic_nodes)
+                    rewards[1,step_cpt] += torch.sum(torch.from_numpy(obs['player_0']['relic_nodes_mask'].astype(float))) / (self.max_relic_nodes)
+
+                    map_0 = new_map_0
+                    map_1 = new_map_1
+                    energy_0 = new_energy_0
+                    energy_1 = new_energy_1
+                    enemy_0 = new_enemy_0
+                    enemy_1 = new_enemy_1
                     
                     cumulated_reward[0] += rewards[0,step_cpt]
                     cumulated_reward[1] += rewards[1,step_cpt]
@@ -346,13 +401,14 @@ class ReplayBuffer(Dataset):
 if __name__ == "__main__":
 
     print('Initialise training environment...\n')
-    lr0 = 1e-4
+    lr0 = 1e-6
     lr1 = 1e-5
-    max_norm0 = 1.0
+    max_norm0 = 0.5
     max_norm1 = 0.5
+    entropy_coef0 = 0.1
+    entropy_coef1 = 0.1
 
     batch_size = 50
-    entropy_coef = 0.1
     vf_coef = 1.0
     gamma = 0.99
     gae_lambda = 0.95
@@ -376,7 +432,7 @@ if __name__ == "__main__":
     step_cpt = 0
     reward_cpt = 0
     
-    writer = SummaryWriter("runs/experiment_3")
+    writer = SummaryWriter("runs/experiment_4")
 
     model_0 = Policy(n_input, n_action, env.env_params, 'player_0')
     model_0.share_memory()  # For multiprocessing, the model parameters must be shared
@@ -456,7 +512,7 @@ if __name__ == "__main__":
                 policy_loss_0 = -torch.mean(log_probs_ * advantages_)
                 value_loss_0 = F.mse_loss(values_, returns_)
 
-                loss_0 = policy_loss_0 + vf_coef *value_loss_0 + entropy_coef * entropy_loss_0
+                loss_0 = policy_loss_0 + vf_coef *value_loss_0 + entropy_coef0 * entropy_loss_0
 
                 # Update model
                 optimizer_0.zero_grad()
@@ -478,7 +534,7 @@ if __name__ == "__main__":
                 policy_loss_1 = -torch.mean(log_probs_ * advantages_)
                 value_loss_1 = F.mse_loss(values_, returns_)
 
-                loss_1 = policy_loss_1 + vf_coef *value_loss_1 + entropy_coef * entropy_loss_1
+                loss_1 = policy_loss_1 + vf_coef *value_loss_1 + entropy_coef1 * entropy_loss_1
 
                 # Update model
                 optimizer_1.zero_grad()
