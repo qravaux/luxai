@@ -2,10 +2,11 @@ from lux.utils import direction_to
 import sys
 sys.path.append('../../')
 import numpy as np
-from train import Policy, obs_to_state, sample_action
+from train import Policy, obs_to_state
 import torch
 import flax.serialization
 from luxai_s3.utils import to_numpy
+from src.luxai_s3.wrappers import LuxAIS3GymEnv
 
 
 class Agent():
@@ -16,41 +17,32 @@ class Agent():
         self.opp_team_id = 1 if self.team_id == 0 else 0
         np.random.seed(0)
         self.env_cfg = env_cfg
-        
+        env = LuxAIS3GymEnv(numpy_output=True)
+
         self.relic_node_positions = []
         self.discovered_relic_nodes_ids = set()
         self.unit_explore_locations = dict()
 
         n_action = 6
         n_input = 1880
-        self.n_units = 16
-        self.sap_range = 4
 
-        self.policy_0 = Policy(n_input,n_action,self.n_units,self.sap_range)
-        self.policy_1 = Policy(n_input,n_action,self.n_units,self.sap_range)
+        self.policy_0 = Policy(n_input,n_action,env.env_params,self.player)
+        self.policy_1 = Policy(n_input,n_action,env.env_params,self.player)
 
-        self.policy_0.load_state_dict(torch.load("../../policy/policy_0_epoch_3000.pth", weights_only=True))
-        self.policy_1.load_state_dict(torch.load("../../policy/policy_1_epoch_3000.pth", weights_only=True))
+        self.policy_0.load_state_dict(torch.load("../../policy/policy_0_epoch_0.pth", weights_only=True))
+        self.policy_1.load_state_dict(torch.load("../../policy/policy_1_epoch_0.pth", weights_only=True))
 
     def act(self, step: int, obs, remainingOverageTime: int = 60):
 
         obs = to_numpy(flax.serialization.to_state_dict(obs))
-
-        state_0 = obs_to_state(obs)
-        state_1 = obs_to_state(obs)
-
-        #Compute actions probabilities and values
-        actor_action_0, actor_dx_0, actor_dy_0, value_0 = self.policy_0(state_0)
-        actor_action_1, actor_dx_1, actor_dy_1, value_1 = self.policy_1(state_1)
-
-        # Sample actions based on probabilities
-        action_0 = sample_action(actor_action_0, actor_dx_0, actor_dy_0, self.n_units, self.sap_range)
-        action_1 = sample_action(actor_action_1, actor_dx_1, actor_dy_1, self.n_units, self.sap_range)
+        state= obs_to_state(obs)
 
         if self.player == "player_0" :
-            return action_0
+            action,_,_,_,_ = self.policy_0(state,obs)
+            return action
         else :
-            return action_1
+            action,_,_,_,_ = self.policy_0(state,obs)
+            return action     
 
         """
         unit_mask = np.array(obs["units_mask"][self.team_id]) # shape (max_units, )

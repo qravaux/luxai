@@ -5,3 +5,4 @@ episodes/
 replays/
 runs/
 policy/
+kits/python/replay*

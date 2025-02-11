@@ -36,78 +36,126 @@ def obs_to_state(obs:dict) -> torch.Tensor:
 
     return state
 
-def compute_log_prob(actor_action, actor_dx, actor_dy, action):
-    batch_size = actor_action.size(0)
-    n_units = actor_action.size(1)
-
-    step_indices = torch.arange(batch_size).unsqueeze(1).expand(-1, n_units)
-    unit_indices = torch.arange(n_units).unsqueeze(0).expand(batch_size, -1) 
-
-    # Computing log probabilities for the actions
-    log_prob = torch.sum(actor_action[step_indices,unit_indices, action[:,:, 0]],axis=1)
-    log_prob += torch.sum(actor_dx[step_indices,unit_indices, action[:,:, 1]],axis=1)
-    log_prob += torch.sum(actor_dy[step_indices,unit_indices, action[:,:, 2]],axis=1)
-
-    return log_prob
-
-def sample_action(actor_action, actor_dx, actor_dy, n_units, sap_range):
-
-    # Sampling action based on the policy
-    action = torch.zeros(n_units, 3, dtype=torch.int)
-    action[:, 0] = Categorical(logits=actor_action[0]).sample()
-    action[:, 1] = Categorical(logits=actor_dx[0]).sample() - sap_range
-    action[:, 2] = Categorical(logits=actor_dy[0]).sample() - sap_range
-
-    sap = (action[:,0] != 5)
-    action[sap,1] = 0
-    action[sap,2] = 0
-
-    return action
-
 class Policy(nn.Module) :
 
-    def __init__(self,n_input,n_action,n_units,sap_range) :
+    def __init__(self,n_input,n_action,env_param,player) :
 
         super(Policy,self).__init__()
 
-        self.n_units = n_units
+        if player == 'player_0' :
+            self.player_id = 0
+        else :
+            self.player_id = 1
+
         self.n_action = n_action
-        self.sap_range = sap_range
+        self.n_units = env_param.max_units
+        self.sap_range = env_param.unit_sap_range
+        self.unit_move_cost = env_param.unit_move_cost
+        self.unit_sap_cost = env_param.unit_sap_cost
 
-        self.inputs = nn.Linear(n_input,64,dtype=torch.double)
+        self.feature_size = 64
+        self.network_size = [1024,512]
 
-        #self.hidden1 = nn.Linear(1024,512,dtype=torch.double)
-        #self.hidden2 = nn.Linear(512,5,dtype=torch.double)
+        self.hidden = [nn.Linear(self.network_size[i],self.network_size[i+1],dtype=torch.double) for i in range(len(self.network_size)-1)]
+        self.inputs = nn.Linear(n_input,self.network_size[0],dtype=torch.double)
+        self.outputs = nn.Linear(self.network_size[-1],self.feature_size,dtype=torch.double)
 
-        self.actor_action = []
-        self.actor_dx = []
-        self.actor_dy = []
+        self.actor_action = nn.Linear(self.feature_size,self.n_action*self.n_units,dtype=torch.double)
+        self.actor_dx = nn.Linear(self.feature_size,(self.sap_range*2+1)*self.n_units,dtype=torch.double)
+        self.actor_dy = nn.Linear(self.feature_size,(self.sap_range*2+1)*self.n_units,dtype=torch.double)
 
-        for unit in range(self.n_units) :
-            self.actor_action.append(nn.Linear(64,self.n_action,dtype=torch.double))
-            self.actor_dx.append(nn.Linear(64,self.sap_range*2 + 1,dtype=torch.double))
-            self.actor_dy.append(nn.Linear(64,self.sap_range*2 + 1,dtype=torch.double))
+        self.critic = nn.Linear(self.feature_size,1,dtype=torch.double)
 
-        self.critic = nn.Linear(64,1,dtype=torch.double)
-
-    def forward(self,x) :
+    def training_forward(self,x,action,mask_action,mask_dx,mask_dy) :
 
         x = F.relu(self.inputs(x))
-        #x = F.relu(self.hidden1(x))
-        #x = F.relu(self.hidden2(x))
+        for layer in self.hidden :
+            x = F.relu(layer(x))
+        x = F.relu(self.outputs(x))
 
-        actor_action = torch.zeros(x.size(0),self.n_units,self.n_action)
-        actor_dx = torch.zeros(x.size(0),self.n_units,self.sap_range*2 + 1)
-        actor_dy = torch.zeros(x.size(0),self.n_units,self.sap_range*2 + 1)
+        actor_action = self.actor_action(x).view(-1,self.n_units,self.n_action) + torch.nan_to_num(mask_action*(-torch.inf))
+        actor_dx = self.actor_dx(x).view(-1,self.n_units,self.sap_range*2+1) + torch.nan_to_num(mask_dx*(-torch.inf))
+        actor_dy = self.actor_dy(x).view(-1,self.n_units,self.sap_range*2+1) + torch.nan_to_num(mask_dy*(-torch.inf))
 
-        for unit in range(self.n_units) :
-            actor_action[:,unit] = F.log_softmax(self.actor_action[unit](x),dim=-1)
-            actor_dx[:,unit] = F.log_softmax(self.actor_dx[unit](x),dim=-1)
-            actor_dy[:,unit] = F.log_softmax(self.actor_dy[unit](x),dim=-1)
+        actor_action = F.log_softmax(actor_action,dim=-1)
+        actor_dx = F.log_softmax(actor_dx,dim=-1)
+        actor_dy = F.log_softmax(actor_dy,dim=-1)
 
         value = self.critic(x)
 
-        return actor_action,actor_dx,actor_dy,value
+        # Computing log probabilities for the actions
+
+        batch_size = actor_action.size(0)
+        n_units = actor_action.size(1)
+
+        step_indices = torch.arange(batch_size).unsqueeze(1).expand(-1, n_units)
+        unit_indices = torch.arange(n_units).unsqueeze(0).expand(batch_size, -1) 
+
+        log_prob = torch.sum(actor_action[step_indices,unit_indices, action[:,:, 0]],axis=1)
+        log_prob += torch.sum(actor_dx[step_indices,unit_indices, action[:,:, 1]+self.sap_range],axis=1)
+        log_prob += torch.sum(actor_dy[step_indices,unit_indices, action[:,:, 2]+self.sap_range],axis=1)
+
+        return value,log_prob.view(-1,1)
+
+    def forward(self,x,obs) :
+
+        x = F.relu(self.inputs(x))
+        for layer in self.hidden :
+            x = F.relu(layer(x))
+        x = F.relu(self.outputs(x))
+
+        state = {}
+        state['energy'] = torch.from_numpy(obs['units']['energy'][self.player_id].astype(int)).view(self.n_units)
+        state['units'] = torch.from_numpy(obs['units']['position'][self.player_id].astype(int)).view(self.n_units,2)
+        state['map'] = torch.from_numpy(obs['map_features']['tile_type'].astype(int)).view(24,24)
+        
+
+        energy_mask = state['energy'] < self.unit_move_cost
+        sap_mask = state['energy'] < self.unit_sap_cost
+
+        mask_action = torch.zeros(self.n_units,self.n_action)
+        mask_dx = torch.zeros(self.n_units,self.sap_range*2+1)
+        mask_dy = torch.zeros(self.n_units,self.sap_range*2+1)
+
+        mask_action[torch.where(energy_mask)[0],1:] += 1
+        mask_action[torch.where(sap_mask)[0],-1] += 1
+
+        directions = torch.tensor([[0,-1],[1,0],[0,1],[-1,0],]).view(4,2)
+        target_tiles = state['units'].unsqueeze(1).expand(self.n_units, 4, 2) + directions
+        clamp_target_tiles = torch.clamp(target_tiles,0,23).view(self.n_units*4,2)
+        target_tiles_type = state['map'][clamp_target_tiles[:,0],clamp_target_tiles[:,1]].view(self.n_units,4)
+
+        correct_move_direction = (((target_tiles >= 0) & (target_tiles <= 23)).all(dim=-1)) & (target_tiles_type != 1)
+        forbidden_move = 1 - correct_move_direction.int() 
+        mask_action[:,1:-1] += forbidden_move
+        
+        
+        actor_action = self.actor_action(x).view(self.n_units,self.n_action) + torch.nan_to_num(mask_action*(-torch.inf))
+        actor_action = F.log_softmax(actor_action,dim=-1)
+        action_choice = Categorical(logits=actor_action).sample()
+
+        sap_mask =  sap_mask | (action_choice !=5)
+
+        mask_dx[torch.where(sap_mask)[0]] = 1
+        mask_dy[torch.where(sap_mask)[0]] = 1
+        mask_dx[:,self.sap_range] = 0
+        mask_dy[:,self.sap_range] = 0
+
+        actor_dx = self.actor_dx(x).view(self.n_units,self.sap_range*2+1) + torch.nan_to_num(mask_dx*(-torch.inf))
+        actor_dy = self.actor_dy(x).view(self.n_units,self.sap_range*2+1) + torch.nan_to_num(mask_dy*(-torch.inf))
+        actor_dx = F.log_softmax(actor_dx,dim=-1)
+        actor_dy = F.log_softmax(actor_dy,dim=-1)
+
+        # Sampling action based on the policy
+        action = torch.zeros(self.n_units, 3, dtype=torch.int)
+
+        action[:, 0] = action_choice
+        action[:, 1] = Categorical(logits=actor_dx).sample() - self.sap_range
+        action[:, 2] = Categorical(logits=actor_dy).sample() - self.sap_range
+
+        value = self.critic(x)
+
+        return action, value, mask_action, mask_dx, mask_dy 
     
 class Luxai_Worker(mp.Process) :
 
@@ -136,7 +184,7 @@ class Luxai_Worker(mp.Process) :
         self.event = event
         self.worker_id = worker_id
 
-        for _ in range(self.worker_id):#*8) :
+        for _ in range(self.worker_id*8) :
             _, _ = self.env.reset()
 
     def run(self) :
@@ -148,6 +196,9 @@ class Luxai_Worker(mp.Process) :
             values = torch.zeros(2,self.n_steps,1,dtype=torch.double)
             rewards = torch.zeros(2,self.n_steps,dtype=torch.double)
             episode_start = torch.zeros(self.n_steps,dtype=torch.double)
+            mask_actions = torch.zeros(2,self.n_steps,self.n_units,self.n_action)
+            mask_dxs = torch.zeros(2,self.n_steps,self.n_units,self.sap_range*2+1)
+            mask_dys = torch.zeros(2,self.n_steps,self.n_units,self.sap_range*2+1)
 
             step_cpt = 0
 
@@ -163,13 +214,9 @@ class Luxai_Worker(mp.Process) :
 
                 for ep_step in range(self.len_episode):
 
-                    #Compute actions probabilities and values
-                    actor_action_0, actor_dx_0, actor_dy_0, value_0 = self.policy_0(state_0)
-                    actor_action_1, actor_dx_1, actor_dy_1, value_1 = self.policy_1(state_1)
-
-                    # Sample actions based on probabilities
-                    action_0 = sample_action(actor_action_0, actor_dx_0, actor_dy_0, self.n_units, self.sap_range)
-                    action_1 = sample_action(actor_action_1, actor_dx_1, actor_dy_1, self.n_units, self.sap_range)
+                    #Compute action probabilities with masks and sample action
+                    action_0 , value_0, mask_action_0 , mask_dx_0, mask_dy_0  = self.policy_0(state_0,obs['player_0'])
+                    action_1 , value_1, mask_action_1 , mask_dx_1, mask_dy_1  = self.policy_1(state_1,obs['player_1'])
 
                     # Take a step in the environment
                     action = dict(player_0=np.array(action_0, dtype=int), player_1=np.array(action_1, dtype=int))
@@ -206,10 +253,7 @@ class Luxai_Worker(mp.Process) :
 
                         returns = advantages + values
 
-                        advantages[0] = (advantages[0] - advantages[0].mean()) / (advantages[0].std() + 1e-8)
-                        advantages[1] = (advantages[1] - advantages[1].mean()) / (advantages[1].std() + 1e-8)
-
-                        self.shared_queue.put((states,actions,advantages,returns))
+                        self.shared_queue.put((states,actions,advantages,returns,mask_actions,mask_dxs,mask_dys))
 
                         step_cpt = 0
                         states = torch.zeros(2,self.n_steps,self.n_inputs,dtype=torch.double)
@@ -217,6 +261,9 @@ class Luxai_Worker(mp.Process) :
                         values = torch.zeros(2,self.n_steps,1,dtype=torch.double)
                         rewards = torch.zeros(2,self.n_steps,dtype=torch.double)
                         episode_start = torch.zeros(self.n_steps,dtype=torch.double)
+                        mask_actions = torch.zeros(2,self.n_steps,self.n_units,self.n_action)
+                        mask_dxs = torch.zeros(2,self.n_steps,self.n_units,self.sap_range*2+1)
+                        mask_dys = torch.zeros(2,self.n_steps,self.n_units,self.sap_range*2+1)
 
                         self.event.wait()
                         self.event.clear()
@@ -245,6 +292,9 @@ class Luxai_Worker(mp.Process) :
                     else :
                         rewards[0,step_cpt] = obs['player_0']['team_points'][0] - previous_obs['player_0']['team_points'][0]
                         rewards[1,step_cpt] = obs['player_1']['team_points'][1] - previous_obs['player_1']['team_points'][1]
+
+                    rewards[0,step_cpt] = torch.sum(torch.from_numpy(obs['player_0']['sensor_mask'].astype(float))) / 576
+                    rewards[1,step_cpt] = torch.sum(torch.from_numpy(obs['player_1']['sensor_mask'].astype(float))) / 576
                     
                     cumulated_reward[0] += rewards[0,step_cpt]
                     cumulated_reward[1] += rewards[1,step_cpt]
@@ -259,6 +309,14 @@ class Luxai_Worker(mp.Process) :
                     values[0,step_cpt] = value_0
                     values[1,step_cpt] = value_1
 
+                    mask_actions[0,step_cpt] = mask_action_0
+                    mask_actions[1,step_cpt] = mask_action_1
+
+                    mask_dxs[0,step_cpt] = mask_dx_0
+                    mask_dxs[1,step_cpt] = mask_dx_1
+                    mask_dys[0,step_cpt] = mask_dy_0
+                    mask_dys[1,step_cpt] = mask_dy_1
+
                     state_0 = next_state_0
                     state_1 = next_state_1
 
@@ -269,24 +327,27 @@ class Luxai_Worker(mp.Process) :
 
 
 class ReplayBuffer(Dataset):
-    def __init__(self,states,actions,advantages,returns):
+    def __init__(self,states,actions,advantages,returns,mask_action,mask_dx,mask_dy):
 
         self.states = states
         self.actions = actions
         self.advantages = advantages
         self.returns = returns
+        self.mask_action = mask_action
+        self.mask_dx = mask_dx
+        self.mask_dy = mask_dy
 
     def __len__(self):
         return len(self.states)
 
     def __getitem__(self, idx):
-        return self.states[idx], self.actions[idx], self.advantages[idx], self.returns[idx]
+        return self.states[idx],self.actions[idx],self.advantages[idx],self.returns[idx],self.mask_action[idx],self.mask_dx[idx],self.mask_dy[idx]
     
 if __name__ == "__main__":
 
     print('Initialise training environment...\n')
-    lr0 = 1e-5
-    lr1 = 1e-6
+    lr0 = 1e-4
+    lr1 = 1e-5
     max_norm0 = 1.0
     max_norm1 = 0.5
 
@@ -315,13 +376,13 @@ if __name__ == "__main__":
     step_cpt = 0
     reward_cpt = 0
     
-    writer = SummaryWriter("runs/experiment_1")
+    writer = SummaryWriter("runs/experiment_3")
 
-    model_0 = Policy(n_input, n_action, n_units, sap_range=sap_range)
+    model_0 = Policy(n_input, n_action, env.env_params, 'player_0')
     model_0.share_memory()  # For multiprocessing, the model parameters must be shared
     optimizer_0 = torch.optim.Adam(model_0.parameters(), lr=lr0)
 
-    model_1 = Policy(n_input, n_action, n_units, sap_range=sap_range)
+    model_1 = Policy(n_input, n_action, env.env_params, 'player_1')
     model_1.share_memory()  # For multiprocessing, the model parameters must be shared
     optimizer_1 = torch.optim.Adam(model_1.parameters(), lr=lr1)
 
@@ -348,27 +409,33 @@ if __name__ == "__main__":
 
         for _ in range(n_episode):
 
-            states,actions,advantages,returns = shared_queue.get()
+            states,actions,advantages,returns,mask_actions,mask_dxs,mask_dys = shared_queue.get()
 
-            experiences_0.append((states[0],actions[0],advantages[0],returns[0]))
-            experiences_1.append((states[1],actions[1],advantages[1],returns[1]))
+            experiences_0.append((states[0],actions[0],advantages[0],returns[0],mask_actions[0],mask_dxs[0],mask_dys[0]))
+            experiences_1.append((states[1],actions[1],advantages[1],returns[1],mask_actions[1],mask_dxs[1],mask_dys[1]))
 
         # Process the collected experiences
-        states_0,actions_0,advantages_0,returns_0 = zip(*experiences_0)
-        states_1,actions_1,advantages_1,returns_1 = zip(*experiences_1)
+        states_0,actions_0,advantages_0,returns_0,mask_action_0,mask_dx_0,mask_dy_0 = zip(*experiences_0)
+        states_1,actions_1,advantages_1,returns_1,mask_action_1,mask_dx_1,mask_dy_1 = zip(*experiences_1)
 
         states_0 = torch.cat(states_0,dim=0)
         actions_0 = torch.cat(actions_0,dim=0)
         advantages_0 = torch.cat(advantages_0,dim=0)
         returns_0 = torch.cat(returns_0,dim=0)
+        mask_action_0 = torch.cat(mask_action_0,dim=0)
+        mask_dx_0 = torch.cat(mask_dx_0,dim=0)
+        mask_dy_0 = torch.cat(mask_dy_0,dim=0)
 
         states_1 = torch.cat(states_1,dim=0)
         actions_1 = torch.cat(actions_1,dim=0)
         advantages_1 = torch.cat(advantages_1,dim=0)
         returns_1 = torch.cat(returns_1,dim=0)
+        mask_action_1 = torch.cat(mask_action_1,dim=0)
+        mask_dx_1 = torch.cat(mask_dx_1,dim=0)
+        mask_dy_1 = torch.cat(mask_dy_1,dim=0)
 
-        train_data_0 = ReplayBuffer(states_0,actions_0,advantages_0,returns_0)
-        train_data_1 = ReplayBuffer(states_1,actions_1,advantages_1,returns_1)
+        train_data_0 = ReplayBuffer(states_0,actions_0,advantages_0,returns_0,mask_action_0,mask_dx_0,mask_dy_0)
+        train_data_1 = ReplayBuffer(states_1,actions_1,advantages_1,returns_1,mask_action_1,mask_dx_1,mask_dy_1)
  
         train_loader_0 = DataLoader(train_data_0, batch_size=batch_size, shuffle=True)
         train_loader_1 = DataLoader(train_data_1, batch_size=batch_size, shuffle=True)
@@ -377,11 +444,12 @@ if __name__ == "__main__":
 
             for batch in train_loader_0 :
 
-                states_,actions_,advantages_,returns_ = batch
+                states_,actions_,advantages_,returns_,mask_action_,mask_dx_,mask_dy_ = batch
 
                 #Compute log_probs and values
-                actor_action_, actor_dx_, actor_dy_, values_ = model_0(states_)
-                log_probs_ = compute_log_prob(actor_action_, actor_dx_, actor_dy_, actions_)
+                values_,log_probs_ = model_0.training_forward(states_,actions_,mask_action_,mask_dx_,mask_dy_)
+
+                advantages_ = (advantages_ - advantages_.mean()) / (advantages_.std() + 1e-8)
 
                 # Losses
                 entropy_loss_0 = -torch.mean(torch.exp(log_probs_) * log_probs_)
@@ -398,11 +466,12 @@ if __name__ == "__main__":
 
             for batch in train_loader_1 :
 
-                states_,actions_,advantages_,returns_ = batch
+                states_,actions_,advantages_,returns_,mask_action_,mask_dx_,mask_dy_ = batch
 
                 #Compute log_probs and values
-                actor_action_, actor_dx_, actor_dy_, values_ = model_1(states_)
-                log_probs_ = compute_log_prob(actor_action_, actor_dx_, actor_dy_, actions_)
+                values_,log_probs_ = model_1.training_forward(states_,actions_,mask_action_,mask_dx_,mask_dy_)
+
+                advantages_ = (advantages_ - advantages_.mean()) / (advantages_.std() + 1e-8)
 
                 # Losses
                 entropy_loss_1 = -torch.mean(torch.exp(log_probs_) * log_probs_)
