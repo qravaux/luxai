@@ -12,34 +12,34 @@ from torch.utils.tensorboard import SummaryWriter
 def obs_to_state(obs:dict) -> torch.Tensor:
     list_state_features = []
 
-    state_maps = torch.zeros(3,24,24)
+    state_maps = torch.zeros(3,24,24,dtype=torch.float)
     
-    state_maps[0] = torch.from_numpy(obs['map_features']['energy'].astype(float)) #map_energy
-    state_maps[1] = torch.from_numpy(obs['sensor_mask'].astype(float)) #sensor_mask
-    state_maps[2] = torch.from_numpy(obs['map_features']['tile_type'].astype(float)) #map_tile_type
+    state_maps[0] = torch.from_numpy(obs['map_features']['energy'].astype(np.float32)) #map_energy
+    state_maps[1] = torch.from_numpy(obs['sensor_mask'].astype(np.float32)) #sensor_mask
+    state_maps[2] = torch.from_numpy(obs['map_features']['tile_type'].astype(np.float32)) #map_tile_type
 
     #Units
-    list_state_features.append(torch.from_numpy(obs['units']['position'].astype(float)).flatten()/24) #position
-    list_state_features.append(torch.from_numpy(obs['units']['energy'].astype(float)).flatten()/400) #energy
-    list_state_features.append(torch.from_numpy(obs['units_mask'].astype(float)).flatten()) #unit_mask
+    list_state_features.append(torch.from_numpy(obs['units']['position'].astype(np.float32)).flatten()/24) #position
+    list_state_features.append(torch.from_numpy(obs['units']['energy'].astype(np.float32)).flatten()/400) #energy
+    list_state_features.append(torch.from_numpy(obs['units_mask'].astype(np.float32)).flatten()) #unit_mask
 
-    list_state_features.append(torch.from_numpy(obs['relic_nodes'].astype(float)).flatten()) #relic_nodes
-    list_state_features.append(torch.from_numpy(obs['relic_nodes_mask'].astype(float)).flatten()) #relic_nodes_mask
+    list_state_features.append(torch.from_numpy(obs['relic_nodes'].astype(np.float32)).flatten()) #relic_nodes
+    list_state_features.append(torch.from_numpy(obs['relic_nodes_mask'].astype(np.float32)).flatten()) #relic_nodes_mask
 
     #Game
-    list_state_features.append(torch.from_numpy(obs['team_points'].astype(float)).flatten()/3000) #team_points
-    list_state_features.append(torch.from_numpy(obs['team_wins'].astype(float)).flatten()/5) #team_wins
+    list_state_features.append(torch.from_numpy(obs['team_points'].astype(np.float32)).flatten()/3000) #team_points
+    list_state_features.append(torch.from_numpy(obs['team_wins'].astype(np.float32)).flatten()/5) #team_wins
 
-    list_state_features.append(torch.from_numpy(obs['steps'].astype(float)).flatten()/100) #steps
-    list_state_features.append(torch.from_numpy(obs['match_steps'].astype(float)).flatten()/5) #match_steps
+    list_state_features.append(torch.from_numpy(obs['steps'].astype(np.float32)).flatten()/100) #steps
+    list_state_features.append(torch.from_numpy(obs['match_steps'].astype(np.float32)).flatten()/5) #match_steps
     
-    state = {'features':torch.cat(list_state_features),'maps':state_maps}
+    state_features = torch.cat(list_state_features)
 
-    return state
+    return state_maps , state_features
 
 class Policy(nn.Module) :
 
-    def __init__(self,state,n_action,env_param,player) :
+    def __init__(self,state_maps,state_features,n_action,env_param,player) :
 
         super(Policy,self).__init__()
 
@@ -54,43 +54,62 @@ class Policy(nn.Module) :
         self.unit_move_cost = env_param.unit_move_cost
         self.unit_sap_cost = env_param.unit_sap_cost
 
-        self.network_size = [1024,512,64]
-        self.cnn_channels = [9,27,9]
-        self.cnn_kernels = [9,6,3]
-        
-        self.n_input_maps = state['maps'].size(0)
+        self.actor_size = [2048,1024,512,256]
+        self.cnn_channels = [3,9,27]
+        self.cnn_kernels = [3,5,9]
+        self.cnn_strides = [1,1,1]
+        self.critic_size = [512,256,128,64]
+    
+        self.n_input_maps = state_maps.size(0)
+
+        self.activation = nn.ReLU()
+        self.max_pooling = nn.MaxPool2d(kernel_size=2)
 
         self.cnn_inputs = nn.Conv2d(self.n_input_maps,
-                                    self.cnn_size[0],
+                                    self.cnn_channels[0],
                                     kernel_size=self.cnn_kernels[0],
-                                    padding=self.cnn_kernels[0]-1)
+                                    padding=self.cnn_kernels[0]-1,
+                                    stride=self.cnn_strides[0],
+                                    dtype=torch.float)
         
-        self.cnn_hidden = [nn.Conv2d(self.cnn_size[i-1],
-                                     self.cnn_size[i],
-                                     kernel_size=self.cnn_kernels[i],
-                                     padding=self.cnn_kernels[i]-1) for i in range(1,len(self.cnn_channels)-1)]
+        self.cnn_hidden = [nn.Conv2d(self.cnn_channels[i],
+                                     self.cnn_channels[i+1],
+                                     kernel_size=self.cnn_kernels[i+1],
+                                     padding=self.cnn_kernels[i+1]-1,
+                                    stride=self.cnn_strides[i+1],
+                                    dtype=torch.float) for i in range(len(self.cnn_channels)-1)]
         
-        with torch.no_grad :
-            x = self.cnn_inputs(state["maps"])
+        with torch.no_grad() :
+            x = self.cnn_inputs(state_maps)
+            x = self.max_pooling(x)
             for layer in self.cnn_hidden :
                 x = layer(x)
-                self.n_input_features = x.flatten().size() + state['features'].size(0)
+                x = self.max_pooling(x)
+            self.n_input_features = x.flatten().size(0) + state_features.size(0)
         
-        self.inputs = nn.Linear(self.n_input_features,self.network_size[0],dtype=torch.double)
-        self.hidden = [nn.Linear(self.network_size[i],self.network_size[i+1],dtype=torch.double) for i in range(len(self.network_size)-1)]
+        self.inputs_actor = nn.Linear(self.n_input_features,self.actor_size[0],dtype=torch.float)
+        self.hidden_actor = [nn.Linear(self.actor_size[i],self.actor_size[i+1],dtype=torch.float) for i in range(len(self.actor_size)-1)]
 
-        self.actor_action = nn.Linear(self.network_size[-1],self.n_action*self.n_units,dtype=torch.double)
-        self.actor_dx = nn.Linear(self.network_size[-1],(self.sap_range*2+1)*self.n_units,dtype=torch.double)
-        self.actor_dy = nn.Linear(self.network_size[-1],(self.sap_range*2+1)*self.n_units,dtype=torch.double)
+        self.actor_action = nn.Linear(self.actor_size[-1],self.n_action*self.n_units,dtype=torch.float)
+        self.actor_dx = nn.Linear(self.actor_size[-1],(self.sap_range*2+1)*self.n_units,dtype=torch.float)
+        self.actor_dy = nn.Linear(self.actor_size[-1],(self.sap_range*2+1)*self.n_units,dtype=torch.float)
 
-        self.critic = nn.Linear(self.network_size[-1],1,dtype=torch.double)
+        self.inputs_critic = nn.Linear(self.n_input_features,self.critic_size[0],dtype=torch.float)
+        self.hidden_critic = [nn.Linear(self.critic_size[i],self.critic_size[i+1],dtype=torch.float) for i in range(len(self.critic_size)-1)]
+        self.outputs_critic = nn.Linear(self.critic_size[-1],1,dtype=torch.float)
 
-    def training_forward(self,x,action,mask_action,mask_dx,mask_dy) :
+    def training_forward(self,x_maps,x_features,action,mask_action,mask_dx,mask_dy) :
 
-        x = F.relu(self.inputs(x))
-        for layer in self.hidden :
-            x = F.relu(layer(x))
-        x = F.relu(self.outputs(x))
+        x = self.activation(self.cnn_inputs(x_maps))
+        x = self.max_pooling(x)
+        for layer in self.cnn_hidden :
+            x = self.activation(layer(x))
+            x = self.max_pooling(x)
+        x_input = torch.cat((x.flatten(start_dim=1),x_features),dim=-1)
+
+        x = self.activation(self.inputs_actor(x_input))
+        for layer in self.hidden_actor :
+            x = self.activation(layer(x))
 
         actor_action = self.actor_action(x).view(-1,self.n_units,self.n_action) + torch.nan_to_num(mask_action*(-torch.inf))
         actor_dx = self.actor_dx(x).view(-1,self.n_units,self.sap_range*2+1) + torch.nan_to_num(mask_dx*(-torch.inf))
@@ -100,7 +119,10 @@ class Policy(nn.Module) :
         actor_dx = F.log_softmax(actor_dx,dim=-1)
         actor_dy = F.log_softmax(actor_dy,dim=-1)
 
-        value = self.critic(x)
+        x = self.activation(self.inputs_critic(x_input))
+        for layer in self.hidden_critic :
+            x = self.activation(layer(x))
+        value = self.outputs_critic(x)
 
         # Computing log probabilities for the actions
 
@@ -110,18 +132,25 @@ class Policy(nn.Module) :
         step_indices = torch.arange(batch_size).unsqueeze(1).expand(-1, n_units)
         unit_indices = torch.arange(n_units).unsqueeze(0).expand(batch_size, -1) 
 
-        log_prob = torch.sum(actor_action[step_indices,unit_indices, action[:,:, 0]],axis=1)
-        log_prob += torch.sum(actor_dx[step_indices,unit_indices, action[:,:, 1]+self.sap_range],axis=1)
-        log_prob += torch.sum(actor_dy[step_indices,unit_indices, action[:,:, 2]+self.sap_range],axis=1)
+        log_prob = torch.sum(actor_action[step_indices,unit_indices, action[:,:, 0]],axis=1,dtype=torch.float)
+        log_prob += torch.sum(actor_dx[step_indices,unit_indices, action[:,:, 1]+self.sap_range],axis=1,dtype=torch.float)
+        log_prob += torch.sum(actor_dy[step_indices,unit_indices, action[:,:, 2]+self.sap_range],axis=1,dtype=torch.float)
 
         return value,log_prob.view(-1,1)
 
-    def forward(self,x,obs) :
+    def forward(self,x_maps,x_features,obs) :
 
-        x = F.relu(self.inputs(x))
-        for layer in self.hidden :
-            x = F.relu(layer(x))
-        x = F.relu(self.outputs(x))
+        x = self.activation(self.cnn_inputs(x_maps))
+        x = self.max_pooling(x)
+        for layer in self.cnn_hidden :
+            x = self.activation(layer(x))
+            x = self.max_pooling(x)
+
+        x_input = torch.cat((x.flatten(start_dim=0),x_features),dim=-1)
+
+        x = self.activation(self.inputs_actor(x_input))
+        for layer in self.hidden_actor :
+            x = self.activation(layer(x))
 
         state = {}
         state['energy'] = torch.from_numpy(obs['units']['energy'][self.player_id].astype(int)).view(self.n_units)
@@ -132,9 +161,9 @@ class Policy(nn.Module) :
         energy_mask = state['energy'] < self.unit_move_cost
         sap_mask = state['energy'] < self.unit_sap_cost
 
-        mask_action = torch.zeros(self.n_units,self.n_action)
-        mask_dx = torch.zeros(self.n_units,self.sap_range*2+1)
-        mask_dy = torch.zeros(self.n_units,self.sap_range*2+1)
+        mask_action = torch.zeros(self.n_units,self.n_action,dtype=torch.int8)
+        mask_dx = torch.zeros(self.n_units,self.sap_range*2+1,dtype=torch.int8)
+        mask_dy = torch.zeros(self.n_units,self.sap_range*2+1,dtype=torch.int8)
 
         mask_action[torch.where(energy_mask)[0],1:] += 1
         mask_action[torch.where(sap_mask)[0],-1] += 1
@@ -172,7 +201,10 @@ class Policy(nn.Module) :
         action[:, 1] = Categorical(logits=actor_dx).sample() - self.sap_range
         action[:, 2] = Categorical(logits=actor_dy).sample() - self.sap_range
 
-        value = self.critic(x)
+        x = self.activation(self.inputs_critic(x_input))
+        for layer in self.hidden_critic :
+            x = self.activation(layer(x))
+        value = self.outputs_critic(x)
 
         return action, value, mask_action, mask_dx, mask_dy 
     
@@ -196,7 +228,11 @@ class Luxai_Worker(mp.Process) :
         self.n_steps = n_steps
 
         self.victory_bonus = victory_bonus
-        self.n_inputs = 1880
+
+        obs, _ = self.env.reset()
+        state_maps, state_features = obs_to_state(obs['player_0'])
+        self.n_inputs_features = state_features.size(0)
+        self.n_inputs_maps = state_maps.size(0)
         self.n_action = 6
 
         self.policy_0 = policy_0
@@ -214,14 +250,15 @@ class Luxai_Worker(mp.Process) :
 
         with torch.no_grad():
 
-            states = torch.zeros(2,self.n_steps,self.n_inputs,dtype=torch.double)
+            states_features = torch.zeros(2,self.n_steps,self.n_inputs_features,dtype=torch.float)
+            states_maps = torch.zeros(2,self.n_steps,self.n_inputs_maps,self.map_width,self.map_height,dtype=torch.float)
             actions = torch.zeros(2,self.n_steps,self.n_units,3,dtype=torch.int)
-            values = torch.zeros(2,self.n_steps,1,dtype=torch.double)
-            rewards = torch.zeros(2,self.n_steps,dtype=torch.double)
-            episode_start = torch.zeros(self.n_steps,dtype=torch.double)
-            mask_actions = torch.zeros(2,self.n_steps,self.n_units,self.n_action)
-            mask_dxs = torch.zeros(2,self.n_steps,self.n_units,self.sap_range*2+1)
-            mask_dys = torch.zeros(2,self.n_steps,self.n_units,self.sap_range*2+1)
+            values = torch.zeros(2,self.n_steps,1,dtype=torch.float)
+            rewards = torch.zeros(2,self.n_steps,dtype=torch.float)
+            episode_start = torch.zeros(self.n_steps,dtype=torch.float)
+            mask_actions = torch.zeros(2,self.n_steps,self.n_units,self.n_action,dtype=torch.int8)
+            mask_dxs = torch.zeros(2,self.n_steps,self.n_units,self.sap_range*2+1,dtype=torch.int8)
+            mask_dys = torch.zeros(2,self.n_steps,self.n_units,self.sap_range*2+1,dtype=torch.int8)
 
             step_cpt = 0
 
@@ -229,26 +266,26 @@ class Luxai_Worker(mp.Process) :
 
                 # Reset the environment and get the initial state
                 obs, _ = self.env.reset()
-                state_0 = obs_to_state(obs['player_0'])
-                state_1 = obs_to_state(obs['player_1'])
+                state_maps_0, state_features_0 = obs_to_state(obs['player_0'])
+                state_maps_1, state_features_1 = obs_to_state(obs['player_1'])
                 previous_obs = obs
                 
-                cumulated_reward = torch.zeros(2)
+                cumulated_reward = torch.zeros(2,dtype=torch.float)
 
-                map_0 = torch.zeros(self.map_width,self.map_height)
-                map_1 = torch.zeros(self.map_width,self.map_height)
+                map_0 = torch.zeros(self.map_width,self.map_height,dtype=torch.float)
+                map_1 = torch.zeros(self.map_width,self.map_height,dtype=torch.float)
 
-                energy_0 = torch.zeros(self.n_units,1)
-                energy_1 = torch.zeros(self.n_units,1)
+                energy_0 = torch.zeros(self.n_units,1,dtype=torch.float)
+                energy_1 = torch.zeros(self.n_units,1,dtype=torch.float)
 
-                enemy_0 = torch.zeros(self.n_units,1)
-                enemy_1 = torch.zeros(self.n_units,1)
+                enemy_0 = torch.zeros(self.n_units,1,dtype=torch.float)
+                enemy_1 = torch.zeros(self.n_units,1,dtype=torch.float)
 
                 for ep_step in range(self.len_episode):
 
                     #Compute action probabilities with masks and sample action
-                    action_0 , value_0, mask_action_0 , mask_dx_0, mask_dy_0  = self.policy_0(state_0,obs['player_0'])
-                    action_1 , value_1, mask_action_1 , mask_dx_1, mask_dy_1  = self.policy_1(state_1,obs['player_1'])
+                    action_0 , value_0, mask_action_0 , mask_dx_0, mask_dy_0  = self.policy_0(state_maps_0,state_features_0,obs['player_0'])
+                    action_1 , value_1, mask_action_1 , mask_dx_1, mask_dy_1  = self.policy_1(state_maps_1,state_features_1,obs['player_1'])
 
                     # Take a step in the environment
                     action = dict(player_0=np.array(action_0, dtype=int), player_1=np.array(action_1, dtype=int))
@@ -258,7 +295,7 @@ class Luxai_Worker(mp.Process) :
                     if step_cpt == self.n_steps :
                         
                         # Advantage computation
-                        advantages = torch.zeros(2,self.n_steps,1)                    
+                        advantages = torch.zeros(2,self.n_steps,1,dtype=torch.float)                    
                         last_gae_lam_0 = 0
                         last_gae_lam_1 = 0
 
@@ -285,24 +322,25 @@ class Luxai_Worker(mp.Process) :
 
                         returns = advantages + values
 
-                        self.shared_queue.put((states,actions,advantages,returns,mask_actions,mask_dxs,mask_dys))
+                        self.shared_queue.put((states_maps,states_features,actions,advantages,returns,mask_actions,mask_dxs,mask_dys))
 
                         step_cpt = 0
-                        states = torch.zeros(2,self.n_steps,self.n_inputs,dtype=torch.double)
+                        states_features = torch.zeros(2,self.n_steps,self.n_inputs_features,dtype=torch.float)
+                        states_maps = torch.zeros(2,self.n_steps,self.n_inputs_maps,self.map_width,self.map_height,dtype=torch.float)
                         actions = torch.zeros(2,self.n_steps,self.n_units,3,dtype=torch.int)
-                        values = torch.zeros(2,self.n_steps,1,dtype=torch.double)
-                        rewards = torch.zeros(2,self.n_steps,dtype=torch.double)
-                        episode_start = torch.zeros(self.n_steps,dtype=torch.double)
-                        mask_actions = torch.zeros(2,self.n_steps,self.n_units,self.n_action)
-                        mask_dxs = torch.zeros(2,self.n_steps,self.n_units,self.sap_range*2+1)
-                        mask_dys = torch.zeros(2,self.n_steps,self.n_units,self.sap_range*2+1)
+                        values = torch.zeros(2,self.n_steps,1,dtype=torch.float)
+                        rewards = torch.zeros(2,self.n_steps,dtype=torch.float)
+                        episode_start = torch.zeros(self.n_steps,dtype=torch.float)
+                        mask_actions = torch.zeros(2,self.n_steps,self.n_units,self.n_action,dtype=torch.int8)
+                        mask_dxs = torch.zeros(2,self.n_steps,self.n_units,self.sap_range*2+1,dtype=torch.int8)
+                        mask_dys = torch.zeros(2,self.n_steps,self.n_units,self.sap_range*2+1,dtype=torch.int8)
 
                         self.event.wait()
                         self.event.clear()
 
                     # Compute the rewards
-                    next_state_0 = obs_to_state(obs['player_0'])
-                    next_state_1 = obs_to_state(obs['player_1'])
+                    next_state_maps_0, next_state_features_0 = obs_to_state(obs['player_0'])
+                    next_state_maps_1, next_state_features_1 = obs_to_state(obs['player_1'])
                     episode_start[step_cpt] = 0
                     
                     if ep_step == 0 :
@@ -325,12 +363,12 @@ class Luxai_Worker(mp.Process) :
                         rewards[0,step_cpt] += obs['player_0']['team_points'][0] - previous_obs['player_0']['team_points'][0]
                         rewards[1,step_cpt] += obs['player_1']['team_points'][1] - previous_obs['player_1']['team_points'][1]
 
-                    new_map_0 = torch.clamp_max(map_0 + torch.from_numpy(obs['player_0']['sensor_mask'].astype(float)),1)
-                    new_map_1 = torch.clamp_max(map_1 + torch.from_numpy(obs['player_1']['sensor_mask'].astype(float)),1)
-                    new_energy_0 = torch.from_numpy(obs['player_0']['units']['energy'][0].astype(float))
-                    new_energy_1 = torch.from_numpy(obs['player_1']['units']['energy'][1].astype(float))
-                    new_enemy_0 = torch.from_numpy(obs['player_0']['units']['units_mask'][1].astype(float))
-                    new_enemy_1 = torch.from_numpy(obs['player_1']['units']['units_mask'][0].astype(float))
+                    new_map_0 = torch.clamp_max(map_0 + torch.from_numpy(obs['player_0']['sensor_mask'].astype(np.float32)),1)
+                    new_map_1 = torch.clamp_max(map_1 + torch.from_numpy(obs['player_1']['sensor_mask'].astype(np.float32)),1)
+                    new_energy_0 = torch.from_numpy(obs['player_0']['units']['energy'][0].astype(np.float32))
+                    new_energy_1 = torch.from_numpy(obs['player_1']['units']['energy'][1].astype(np.float32))
+                    new_enemy_0 = torch.from_numpy(obs['player_0']['units_mask'][1].astype(np.float32))
+                    new_enemy_1 = torch.from_numpy(obs['player_1']['units_mask'][0].astype(np.float32))
 
                     rewards[0,step_cpt] += torch.sum(new_map_0-map_0) / (self.map_width*self.map_height)
                     rewards[1,step_cpt] += torch.sum(new_map_1-map_1) / (self.map_width*self.map_height)
@@ -341,8 +379,8 @@ class Luxai_Worker(mp.Process) :
                     rewards[0,step_cpt] -= torch.sum(new_energy_1*new_enemy_0 - energy_1*enemy_0) / (self.max_unit_energy*self.n_units)
                     rewards[1,step_cpt] -= torch.sum(new_energy_0*new_enemy_1 - energy_0*enemy_1) / (self.max_unit_energy*self.n_units)
 
-                    rewards[0,step_cpt] += torch.sum(torch.from_numpy(obs['player_0']['relic_nodes_mask'].astype(float))) / (self.max_relic_nodes)
-                    rewards[1,step_cpt] += torch.sum(torch.from_numpy(obs['player_0']['relic_nodes_mask'].astype(float))) / (self.max_relic_nodes)
+                    rewards[0,step_cpt] += torch.sum(torch.from_numpy(obs['player_0']['relic_nodes_mask'].astype(np.float32))) / (self.max_relic_nodes)
+                    rewards[1,step_cpt] += torch.sum(torch.from_numpy(obs['player_0']['relic_nodes_mask'].astype(np.float32))) / (self.max_relic_nodes)
 
                     map_0 = new_map_0
                     map_1 = new_map_1
@@ -355,8 +393,10 @@ class Luxai_Worker(mp.Process) :
                     cumulated_reward[1] += rewards[1,step_cpt]
 
                     #Update the trajectories
-                    states[0,step_cpt] = state_0
-                    states[1,step_cpt] = state_1
+                    states_maps[0,step_cpt] = state_maps_0
+                    states_features[0,step_cpt] = state_features_0
+                    states_maps[1,step_cpt] = state_maps_1
+                    states_features[1,step_cpt] = state_features_1
 
                     actions[0,step_cpt] = action_0
                     actions[1,step_cpt] = action_1
@@ -372,8 +412,10 @@ class Luxai_Worker(mp.Process) :
                     mask_dys[0,step_cpt] = mask_dy_0
                     mask_dys[1,step_cpt] = mask_dy_1
 
-                    state_0 = next_state_0
-                    state_1 = next_state_1
+                    state_maps_0 = next_state_maps_0
+                    state_features_0 = next_state_features_0
+                    state_maps_1 = next_state_maps_1
+                    state_features_1 = next_state_features_1
 
                     step_cpt += 1
                     previous_obs = obs
@@ -382,9 +424,10 @@ class Luxai_Worker(mp.Process) :
 
 
 class ReplayBuffer(Dataset):
-    def __init__(self,states,actions,advantages,returns,mask_action,mask_dx,mask_dy):
+    def __init__(self,states_maps,states_features,actions,advantages,returns,mask_action,mask_dx,mask_dy):
 
-        self.states = states
+        self.states_maps = states_maps
+        self.states_features = states_features
         self.actions = actions
         self.advantages = advantages
         self.returns = returns
@@ -393,30 +436,30 @@ class ReplayBuffer(Dataset):
         self.mask_dy = mask_dy
 
     def __len__(self):
-        return len(self.states)
+        return len(self.states_maps)
 
     def __getitem__(self, idx):
-        return self.states[idx],self.actions[idx],self.advantages[idx],self.returns[idx],self.mask_action[idx],self.mask_dx[idx],self.mask_dy[idx]
+        return self.states_maps[idx],self.states_features[idx],self.actions[idx],self.advantages[idx],self.returns[idx],self.mask_action[idx],self.mask_dx[idx],self.mask_dy[idx]
     
 if __name__ == "__main__":
 
     print('Initialise training environment...\n')
     lr0 = 1e-6
-    lr1 = 1e-5
+    lr1 = 5e-6
     max_norm0 = 0.5
     max_norm1 = 0.5
     entropy_coef0 = 0.1
-    entropy_coef1 = 0.1
+    entropy_coef1 = 0.2
 
     batch_size = 50
-    vf_coef = 1.0
+    vf_coef = 0.5
     gamma = 0.99
     gae_lambda = 0.95
     save_dir = "policy"
     save_rate = 100
 
     n_epochs = int(1e6)
-    n_batch = 10
+    n_batch = 5
     num_workers = 6
     n_episode = num_workers
     n_steps = 100
@@ -432,13 +475,16 @@ if __name__ == "__main__":
     step_cpt = 0
     reward_cpt = 0
     
-    writer = SummaryWriter("runs/experiment_4")
+    writer = SummaryWriter("runs/experiment_5")
 
-    model_0 = Policy(n_input, n_action, env.env_params, 'player_0')
+    obs, _ = env.reset()
+    state_maps,state_features = obs_to_state(obs['player_0'])
+
+    model_0 = Policy(state_maps,state_features, n_action, env.env_params, 'player_0')
     model_0.share_memory()  # For multiprocessing, the model parameters must be shared
     optimizer_0 = torch.optim.Adam(model_0.parameters(), lr=lr0)
 
-    model_1 = Policy(n_input, n_action, env.env_params, 'player_1')
+    model_1 = Policy(state_maps,state_features, n_action, env.env_params, 'player_1')
     model_1.share_memory()  # For multiprocessing, the model parameters must be shared
     optimizer_1 = torch.optim.Adam(model_1.parameters(), lr=lr1)
 
@@ -465,16 +511,17 @@ if __name__ == "__main__":
 
         for _ in range(n_episode):
 
-            states,actions,advantages,returns,mask_actions,mask_dxs,mask_dys = shared_queue.get()
+            states_maps,states_features,actions,advantages,returns,mask_actions,mask_dxs,mask_dys = shared_queue.get()
 
-            experiences_0.append((states[0],actions[0],advantages[0],returns[0],mask_actions[0],mask_dxs[0],mask_dys[0]))
-            experiences_1.append((states[1],actions[1],advantages[1],returns[1],mask_actions[1],mask_dxs[1],mask_dys[1]))
+            experiences_0.append((states_maps[0],states_features[0],actions[0],advantages[0],returns[0],mask_actions[0],mask_dxs[0],mask_dys[0]))
+            experiences_1.append((states_maps[1],states_features[1],actions[1],advantages[1],returns[1],mask_actions[1],mask_dxs[1],mask_dys[1]))
 
         # Process the collected experiences
-        states_0,actions_0,advantages_0,returns_0,mask_action_0,mask_dx_0,mask_dy_0 = zip(*experiences_0)
-        states_1,actions_1,advantages_1,returns_1,mask_action_1,mask_dx_1,mask_dy_1 = zip(*experiences_1)
+        states_maps_0,states_features_0,actions_0,advantages_0,returns_0,mask_action_0,mask_dx_0,mask_dy_0 = zip(*experiences_0)
+        states_maps_1,states_features_1,actions_1,advantages_1,returns_1,mask_action_1,mask_dx_1,mask_dy_1 = zip(*experiences_1)
 
-        states_0 = torch.cat(states_0,dim=0)
+        states_maps_0 = torch.cat(states_maps_0,dim=0)
+        states_features_0 = torch.cat(states_features_0,dim=0)
         actions_0 = torch.cat(actions_0,dim=0)
         advantages_0 = torch.cat(advantages_0,dim=0)
         returns_0 = torch.cat(returns_0,dim=0)
@@ -482,7 +529,8 @@ if __name__ == "__main__":
         mask_dx_0 = torch.cat(mask_dx_0,dim=0)
         mask_dy_0 = torch.cat(mask_dy_0,dim=0)
 
-        states_1 = torch.cat(states_1,dim=0)
+        states_maps_1 = torch.cat(states_maps_1,dim=0)
+        states_features_1 = torch.cat(states_features_1,dim=0)
         actions_1 = torch.cat(actions_1,dim=0)
         advantages_1 = torch.cat(advantages_1,dim=0)
         returns_1 = torch.cat(returns_1,dim=0)
@@ -490,8 +538,8 @@ if __name__ == "__main__":
         mask_dx_1 = torch.cat(mask_dx_1,dim=0)
         mask_dy_1 = torch.cat(mask_dy_1,dim=0)
 
-        train_data_0 = ReplayBuffer(states_0,actions_0,advantages_0,returns_0,mask_action_0,mask_dx_0,mask_dy_0)
-        train_data_1 = ReplayBuffer(states_1,actions_1,advantages_1,returns_1,mask_action_1,mask_dx_1,mask_dy_1)
+        train_data_0 = ReplayBuffer(states_maps_0,states_features_0,actions_0,advantages_0,returns_0,mask_action_0,mask_dx_0,mask_dy_0)
+        train_data_1 = ReplayBuffer(states_maps_1,states_features_1,actions_1,advantages_1,returns_1,mask_action_1,mask_dx_1,mask_dy_1)
  
         train_loader_0 = DataLoader(train_data_0, batch_size=batch_size, shuffle=True)
         train_loader_1 = DataLoader(train_data_1, batch_size=batch_size, shuffle=True)
@@ -500,10 +548,10 @@ if __name__ == "__main__":
 
             for batch in train_loader_0 :
 
-                states_,actions_,advantages_,returns_,mask_action_,mask_dx_,mask_dy_ = batch
+                states_maps_,states_features_,actions_,advantages_,returns_,mask_action_,mask_dx_,mask_dy_ = batch
 
                 #Compute log_probs and values
-                values_,log_probs_ = model_0.training_forward(states_,actions_,mask_action_,mask_dx_,mask_dy_)
+                values_,log_probs_ = model_0.training_forward(states_maps_,states_features_,actions_,mask_action_,mask_dx_,mask_dy_)
 
                 advantages_ = (advantages_ - advantages_.mean()) / (advantages_.std() + 1e-8)
 
@@ -522,10 +570,10 @@ if __name__ == "__main__":
 
             for batch in train_loader_1 :
 
-                states_,actions_,advantages_,returns_,mask_action_,mask_dx_,mask_dy_ = batch
+                states_maps_,states_features_,actions_,advantages_,returns_,mask_action_,mask_dx_,mask_dy_ = batch
 
                 #Compute log_probs and values
-                values_,log_probs_ = model_1.training_forward(states_,actions_,mask_action_,mask_dx_,mask_dy_)
+                values_,log_probs_ = model_1.training_forward(states_maps_,states_features_,actions_,mask_action_,mask_dx_,mask_dy_)
 
                 advantages_ = (advantages_ - advantages_.mean()) / (advantages_.std() + 1e-8)
 
