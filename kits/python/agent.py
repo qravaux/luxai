@@ -2,12 +2,10 @@ from lux.utils import direction_to
 import sys
 sys.path.append('../../')
 import numpy as np
-from train import Policy, obs_to_state
+from train import Policy
 import torch
-import flax.serialization
 from luxai_s3.utils import to_numpy
-from src.luxai_s3.wrappers import LuxAIS3GymEnv
-
+import flax.serialization
 
 class Agent():
     def __init__(self, player: str, env_cfg) -> None:
@@ -17,32 +15,36 @@ class Agent():
         self.opp_team_id = 1 if self.team_id == 0 else 0
         np.random.seed(0)
         self.env_cfg = env_cfg
-        env = LuxAIS3GymEnv(numpy_output=True)
+
+        self.ep_params = {}
+        self.ep_params['unit_move_cost'] = env_cfg['unit_move_cost']
+        self.ep_params['unit_sap_cost'] = env_cfg['unit_sap_cost']
+        self.ep_params['unit_sap_range'] = env_cfg['unit_sap_range']
+        self.ep_params['unit_sensor_range'] = env_cfg['unit_sensor_range']
 
         self.relic_node_positions = []
         self.discovered_relic_nodes_ids = set()
         self.unit_explore_locations = dict()
 
-        n_action = 6
-        n_input = 1880
+        self.policy_0 = Policy(self.player)
+        self.policy_1 = Policy(self.player)
 
-        self.policy_0 = Policy(n_input,n_action,env.env_params,self.player)
-        self.policy_1 = Policy(n_input,n_action,env.env_params,self.player)
-
-        self.policy_0.load_state_dict(torch.load("../../policy/policy_0_epoch_400.pth", weights_only=True))
-        self.policy_1.load_state_dict(torch.load("../../policy/policy_1_epoch_400.pth", weights_only=True))
+        self.policy_0.load_state_dict(torch.load("../../policy/policy_0_epoch_100.pth", weights_only=True))
+        self.policy_1.load_state_dict(torch.load("../../policy/policy_1_epoch_100.pth", weights_only=True))
 
     def act(self, step: int, obs, remainingOverageTime: int = 60):
 
-        obs = to_numpy(flax.serialization.to_state_dict(obs))
-        state= obs_to_state(obs)
+        good_obs = to_numpy(flax.serialization.to_state_dict(obs))
 
         if self.player == "player_0" :
-            action,_,_,_,_ = self.policy_0(state,obs)
-            return action
+            state_maps ,state_features = self.policy_0.obs_to_state(good_obs,self.ep_params)
+            action,_,_,_,_ = self.policy_0(state_maps ,state_features,good_obs,self.ep_params)
+            return action.numpy()
         else :
-            action,_,_,_,_ = self.policy_0(state,obs)
-            return action     
+            state_maps ,state_features = self.policy_1.obs_to_state(good_obs,self.ep_params)
+            action,_,_,_,_ = self.policy_1(state_maps ,state_features,good_obs,self.ep_params)
+            return action  .numpy()   
+
 
         """
         unit_mask = np.array(obs["units_mask"][self.team_id]) # shape (max_units, )

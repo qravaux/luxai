@@ -6,61 +6,36 @@ import torch.nn.functional as F
 import torch
 import torch.multiprocessing as mp
 import numpy as np
+import random 
 from torch.distributions import Categorical
 from torch.utils.tensorboard import SummaryWriter
 
-def obs_to_state(obs:dict) -> torch.Tensor:
-    list_state_features = []
-
-    state_maps = torch.zeros(3,24,24,dtype=torch.float)
-    
-    state_maps[0] = torch.from_numpy(obs['map_features']['energy'].astype(np.float32)) #map_energy
-    state_maps[1] = torch.from_numpy(obs['sensor_mask'].astype(np.float32)) #sensor_mask
-    state_maps[2] = torch.from_numpy(obs['map_features']['tile_type'].astype(np.float32)) #map_tile_type
-
-    #Units
-    list_state_features.append(torch.from_numpy(obs['units']['position'].astype(np.float32)).flatten()/24) #position
-    list_state_features.append(torch.from_numpy(obs['units']['energy'].astype(np.float32)).flatten()/400) #energy
-    list_state_features.append(torch.from_numpy(obs['units_mask'].astype(np.float32)).flatten()) #unit_mask
-
-    list_state_features.append(torch.from_numpy(obs['relic_nodes'].astype(np.float32)).flatten()) #relic_nodes
-    list_state_features.append(torch.from_numpy(obs['relic_nodes_mask'].astype(np.float32)).flatten()) #relic_nodes_mask
-
-    #Game
-    list_state_features.append(torch.from_numpy(obs['team_points'].astype(np.float32)).flatten()/3000) #team_points
-    list_state_features.append(torch.from_numpy(obs['team_wins'].astype(np.float32)).flatten()/5) #team_wins
-
-    list_state_features.append(torch.from_numpy(obs['steps'].astype(np.float32)).flatten()/100) #steps
-    list_state_features.append(torch.from_numpy(obs['match_steps'].astype(np.float32)).flatten()/5) #match_steps
-    
-    state_features = torch.cat(list_state_features)
-
-    return state_maps , state_features
-
 class Policy(nn.Module) :
 
-    def __init__(self,state_maps,state_features,n_action,env_param,player) :
+    def __init__(self,player) :
 
         super(Policy,self).__init__()
 
         if player == 'player_0' :
             self.player_id = 0
-        else :
+        elif player == 'player_1':
             self.player_id = 1
+        else :
+            raise Exception("Error in player number") 
 
-        self.n_action = n_action
-        self.n_units = env_param.max_units
-        self.sap_range = env_param.unit_sap_range
-        self.unit_move_cost = env_param.unit_move_cost
-        self.unit_sap_cost = env_param.unit_sap_cost
+        self.n_action = 6
+        self.n_units = 16
+        self.max_sap_range = 8
+        self.n_input_maps = 3
+        self.max_relic_nodes = 6
+        self.map_height = 24
+        self.map_width = 24
 
         self.actor_size = [2048,1024,512,256]
         self.cnn_channels = [3,9,27]
         self.cnn_kernels = [3,5,9]
         self.cnn_strides = [1,1,1]
         self.critic_size = [512,256,128,64]
-    
-        self.n_input_maps = state_maps.size(0)
 
         self.activation = nn.ReLU()
         self.max_pooling = nn.MaxPool2d(kernel_size=2)
@@ -79,24 +54,57 @@ class Policy(nn.Module) :
                                     stride=self.cnn_strides[i+1],
                                     dtype=torch.float) for i in range(len(self.cnn_channels)-1)]
         
+        state_maps = torch.zeros(self.n_input_maps,self.map_width,self.map_height)
+        state_features = torch.zeros(8*self.n_units + self.max_relic_nodes*3 + 6 + 4)
+        
         with torch.no_grad() :
             x = self.cnn_inputs(state_maps)
             x = self.max_pooling(x)
             for layer in self.cnn_hidden :
                 x = layer(x)
                 x = self.max_pooling(x)
-            self.n_input_features = x.flatten().size(0) + state_features.size(0)
+            self.n_input_features = x.flatten(start_dim=0).size(0) + state_features.size(0)
         
         self.inputs_actor = nn.Linear(self.n_input_features,self.actor_size[0],dtype=torch.float)
         self.hidden_actor = [nn.Linear(self.actor_size[i],self.actor_size[i+1],dtype=torch.float) for i in range(len(self.actor_size)-1)]
 
         self.actor_action = nn.Linear(self.actor_size[-1],self.n_action*self.n_units,dtype=torch.float)
-        self.actor_dx = nn.Linear(self.actor_size[-1],(self.sap_range*2+1)*self.n_units,dtype=torch.float)
-        self.actor_dy = nn.Linear(self.actor_size[-1],(self.sap_range*2+1)*self.n_units,dtype=torch.float)
+        self.actor_dx = nn.Linear(self.actor_size[-1],(self.max_sap_range*2+1)*self.n_units,dtype=torch.float)
+        self.actor_dy = nn.Linear(self.actor_size[-1],(self.max_sap_range*2+1)*self.n_units,dtype=torch.float)
 
         self.inputs_critic = nn.Linear(self.n_input_features,self.critic_size[0],dtype=torch.float)
         self.hidden_critic = [nn.Linear(self.critic_size[i],self.critic_size[i+1],dtype=torch.float) for i in range(len(self.critic_size)-1)]
         self.outputs_critic = nn.Linear(self.critic_size[-1],1,dtype=torch.float)
+
+    def obs_to_state(self,obs:dict,ep_params:dict) -> torch.Tensor:
+        list_state_features = []
+
+        state_maps = torch.zeros(3,24,24,dtype=torch.float)
+
+        state_maps[0] = torch.from_numpy(obs['map_features']['energy'].astype(np.float32)) #map_energy
+        state_maps[1] = torch.from_numpy(obs['sensor_mask'].astype(np.float32)) #sensor_mask
+        state_maps[2] = torch.from_numpy(obs['map_features']['tile_type'].astype(np.float32)) #map_tile_type
+
+        #Units
+        list_state_features.append(torch.from_numpy(obs['units']['position'].astype(np.float32)).flatten()/24) #position
+        list_state_features.append(torch.from_numpy(obs['units']['energy'].astype(np.float32)).flatten()/400) #energy
+        list_state_features.append(torch.from_numpy(obs['units_mask'].astype(np.float32)).flatten()) #unit_mask
+
+        list_state_features.append(torch.from_numpy(obs['relic_nodes'].astype(np.float32)).flatten()) #relic_nodes
+        list_state_features.append(torch.from_numpy(obs['relic_nodes_mask'].astype(np.float32)).flatten()) #relic_nodes_mask
+
+        #Game
+        list_state_features.append(torch.from_numpy(obs['team_points'].astype(np.float32)).flatten()/3000) #team_points
+        list_state_features.append(torch.from_numpy(obs['team_wins'].astype(np.float32)).flatten()/5) #team_wins
+
+        list_state_features.append(torch.from_numpy(obs['steps'].astype(np.float32)).flatten()/100) #steps
+        list_state_features.append(torch.from_numpy(obs['match_steps'].astype(np.float32)).flatten()/5) #match_steps
+
+        list_state_features.append(torch.FloatTensor([ep_params['unit_move_cost'],ep_params['unit_sap_cost'],ep_params['unit_sap_range'],ep_params['unit_sensor_range']])) #Static information about the episode
+
+        state_features = torch.cat(list_state_features)
+
+        return state_maps , state_features
 
     def training_forward(self,x_maps,x_features,action,mask_action,mask_dx,mask_dy) :
 
@@ -112,8 +120,8 @@ class Policy(nn.Module) :
             x = self.activation(layer(x))
 
         actor_action = self.actor_action(x).view(-1,self.n_units,self.n_action) + torch.nan_to_num(mask_action*(-torch.inf))
-        actor_dx = self.actor_dx(x).view(-1,self.n_units,self.sap_range*2+1) + torch.nan_to_num(mask_dx*(-torch.inf))
-        actor_dy = self.actor_dy(x).view(-1,self.n_units,self.sap_range*2+1) + torch.nan_to_num(mask_dy*(-torch.inf))
+        actor_dx = self.actor_dx(x).view(-1,self.n_units,self.max_sap_range*2+1) + torch.nan_to_num(mask_dx*(-torch.inf))
+        actor_dy = self.actor_dy(x).view(-1,self.n_units,self.max_sap_range*2+1) + torch.nan_to_num(mask_dy*(-torch.inf))
 
         actor_action = F.log_softmax(actor_action,dim=-1)
         actor_dx = F.log_softmax(actor_dx,dim=-1)
@@ -133,12 +141,12 @@ class Policy(nn.Module) :
         unit_indices = torch.arange(n_units).unsqueeze(0).expand(batch_size, -1) 
 
         log_prob = torch.sum(actor_action[step_indices,unit_indices, action[:,:, 0]],axis=1,dtype=torch.float)
-        log_prob += torch.sum(actor_dx[step_indices,unit_indices, action[:,:, 1]+self.sap_range],axis=1,dtype=torch.float)
-        log_prob += torch.sum(actor_dy[step_indices,unit_indices, action[:,:, 2]+self.sap_range],axis=1,dtype=torch.float)
+        log_prob += torch.sum(actor_dx[step_indices,unit_indices, action[:,:, 1]+self.max_sap_range],axis=1,dtype=torch.float)
+        log_prob += torch.sum(actor_dy[step_indices,unit_indices, action[:,:, 2]+self.max_sap_range],axis=1,dtype=torch.float)
 
         return value,log_prob.view(-1,1)
 
-    def forward(self,x_maps,x_features,obs) :
+    def forward(self,x_maps,x_features,obs,ep_params) :
 
         x = self.activation(self.cnn_inputs(x_maps))
         x = self.max_pooling(x)
@@ -157,13 +165,12 @@ class Policy(nn.Module) :
         state['units'] = torch.from_numpy(obs['units']['position'][self.player_id].astype(int)).view(self.n_units,2)
         state['map'] = torch.from_numpy(obs['map_features']['tile_type'].astype(int)).view(24,24)
         
-
-        energy_mask = state['energy'] < self.unit_move_cost
-        sap_mask = state['energy'] < self.unit_sap_cost
+        energy_mask = state['energy'] < ep_params['unit_move_cost']
+        sap_mask = state['energy'] < ep_params['unit_sap_cost']
 
         mask_action = torch.zeros(self.n_units,self.n_action,dtype=torch.int8)
-        mask_dx = torch.zeros(self.n_units,self.sap_range*2+1,dtype=torch.int8)
-        mask_dy = torch.zeros(self.n_units,self.sap_range*2+1,dtype=torch.int8)
+        mask_dx = torch.zeros(self.n_units,self.max_sap_range*2+1,dtype=torch.int8)
+        mask_dy = torch.zeros(self.n_units,self.max_sap_range*2+1,dtype=torch.int8)
 
         mask_action[torch.where(energy_mask)[0],1:] += 1
         mask_action[torch.where(sap_mask)[0],-1] += 1
@@ -184,13 +191,30 @@ class Policy(nn.Module) :
 
         sap_mask =  sap_mask | (action_choice !=5)
 
-        mask_dx[torch.where(sap_mask)[0]] = 1
-        mask_dy[torch.where(sap_mask)[0]] = 1
-        mask_dx[:,self.sap_range] = 0
-        mask_dy[:,self.sap_range] = 0
+        mask_dx[:,:self.max_sap_range-ep_params['unit_sap_range']] += 1
+        mask_dx[:,self.max_sap_range+ep_params['unit_sap_range']:] += 1
+        mask_dy[:,:self.max_sap_range-ep_params['unit_sap_range']] += 1
+        mask_dy[:,self.max_sap_range+ep_params['unit_sap_range']:] += 1
 
-        actor_dx = self.actor_dx(x).view(self.n_units,self.sap_range*2+1) + torch.nan_to_num(mask_dx*(-torch.inf))
-        actor_dy = self.actor_dy(x).view(self.n_units,self.sap_range*2+1) + torch.nan_to_num(mask_dy*(-torch.inf))
+        mask_dx[torch.where(sap_mask)[0]] += 1
+        mask_dy[torch.where(sap_mask)[0]] += 1
+
+        directions = torch.arange(-ep_params['unit_sap_range'],ep_params['unit_sap_range']+1).view(2*ep_params['unit_sap_range']+1)
+        expand_postion = state['units'].unsqueeze(1).expand(self.n_units,2*ep_params['unit_sap_range']+1,2)
+        target_dx = expand_postion[:,:,0].view(self.n_units,2*ep_params['unit_sap_range']+1) + directions
+        target_dy = expand_postion[:,:,1].view(self.n_units,2*ep_params['unit_sap_range']+1) + directions
+
+        forbidden_dx = ((target_dx<0) | (target_dx>23)).int()
+        forbidden_dy = ((target_dy<0) | (target_dy>23)).int()
+
+        mask_dx[:,self.max_sap_range-ep_params['unit_sap_range']:self.max_sap_range+ep_params['unit_sap_range']+1] += forbidden_dx
+        mask_dy[:,self.max_sap_range-ep_params['unit_sap_range']:self.max_sap_range+ep_params['unit_sap_range']+1] += forbidden_dy
+
+        mask_dx[:,self.max_sap_range] = 0
+        mask_dy[:,self.max_sap_range] = 0
+
+        actor_dx = self.actor_dx(x).view(self.n_units,self.max_sap_range*2+1) + torch.nan_to_num(mask_dx*(-torch.inf))
+        actor_dy = self.actor_dy(x).view(self.n_units,self.max_sap_range*2+1) + torch.nan_to_num(mask_dy*(-torch.inf))
         actor_dx = F.log_softmax(actor_dx,dim=-1)
         actor_dy = F.log_softmax(actor_dy,dim=-1)
 
@@ -198,15 +222,15 @@ class Policy(nn.Module) :
         action = torch.zeros(self.n_units, 3, dtype=torch.int)
 
         action[:, 0] = action_choice
-        action[:, 1] = Categorical(logits=actor_dx).sample() - self.sap_range
-        action[:, 2] = Categorical(logits=actor_dy).sample() - self.sap_range
+        action[:, 1] = Categorical(logits=actor_dx).sample() - self.max_sap_range
+        action[:, 2] = Categorical(logits=actor_dy).sample() - self.max_sap_range
 
         x = self.activation(self.inputs_critic(x_input))
         for layer in self.hidden_critic :
             x = self.activation(layer(x))
         value = self.outputs_critic(x)
 
-        return action, value, mask_action, mask_dx, mask_dy 
+        return action, value, mask_action, mask_dx, mask_dy
     
 class Luxai_Worker(mp.Process) :
 
@@ -216,39 +240,50 @@ class Luxai_Worker(mp.Process) :
 
         self.env = LuxAIS3GymEnv(numpy_output=True)
         self.n_units = self.env.env_params.max_units
-        self.sap_range = self.env.env_params.unit_sap_range
         self.max_unit_energy = self.env.env_params.max_unit_energy
         self.map_width = self.env.env_params.map_width
         self.map_height = self.env.env_params.map_height
-        self.max_relic_nodes = self.env.env_params.max_relic_nodes
+        self.max_relic_nodes = self.env.env_params.max_relic_nodes     
         self.match_step = self.env.env_params.max_steps_in_match + 1
         self.len_episode = self.match_step * self.env.env_params.match_count_per_episode
         self.gamma = gamma
         self.gae_lambda = gae_lambda
         self.n_steps = n_steps
 
-        self.victory_bonus = victory_bonus
+        self.sap_range = 8
 
-        obs, _ = self.env.reset()
-        state_maps, state_features = obs_to_state(obs['player_0'])
-        self.n_inputs_features = state_features.size(0)
-        self.n_inputs_maps = state_maps.size(0)
-        self.n_action = 6
+        self.victory_bonus = victory_bonus
 
         self.policy_0 = policy_0
         self.policy_1 = policy_1
+
+        ep_params = {}
+        ep_params['unit_move_cost'] = self.env.env_params.unit_move_cost
+        ep_params['unit_sap_cost'] = self.env.env_params.unit_sap_cost
+        ep_params['unit_sap_range'] = self.env.env_params.unit_sap_range
+        ep_params['unit_sensor_range'] = self.env.env_params.unit_sensor_range
+
+        obs, _ = self.env.reset()
+        state_maps, state_features = self.policy_0.obs_to_state(obs['player_0'],ep_params)
+        self.n_inputs_features = state_features.size(0)
+        self.n_inputs_maps = state_maps.size(0)
+        self.n_action = 6
 
         self.shared_queue = shared_queue
         self.reward_queue = reward_queue
         self.event = event
         self.worker_id = worker_id
 
-        for _ in range(self.worker_id*8) :
-            _, _ = self.env.reset()
-
+    def random_seed(self,length):
+        random.seed()
+        min = 10**(length-1)
+        max = 9*min + (min-1)
+        return random.randint(min, max)
+    
     def run(self) :
 
         with torch.no_grad():
+            not_begin_episode = True
 
             states_features = torch.zeros(2,self.n_steps,self.n_inputs_features,dtype=torch.float)
             states_maps = torch.zeros(2,self.n_steps,self.n_inputs_maps,self.map_width,self.map_height,dtype=torch.float)
@@ -265,9 +300,25 @@ class Luxai_Worker(mp.Process) :
             while True:
 
                 # Reset the environment and get the initial state
-                obs, _ = self.env.reset()
-                state_maps_0, state_features_0 = obs_to_state(obs['player_0'])
-                state_maps_1, state_features_1 = obs_to_state(obs['player_1'])
+                obs, _ = self.env.reset(seed=self.random_seed(10))
+
+                if not_begin_episode :
+                    for i in range(self.worker_id*62) :
+                        action = dict(
+                                    player_0=np.random.randint(0,4,size=(self.n_units, 3)),
+                                    player_1=np.random.randint(0,4,size=(self.n_units, 3))
+                                )
+                        _, _,  _, _ , _ = self.env.step(action)
+                    not_begin_episode = False
+
+                ep_params = {}
+                ep_params['unit_move_cost'] = self.env.env_params.unit_move_cost
+                ep_params['unit_sap_cost'] = self.env.env_params.unit_sap_cost
+                ep_params['unit_sap_range'] = self.env.env_params.unit_sap_range
+                ep_params['unit_sensor_range'] = self.env.env_params.unit_sensor_range
+
+                state_maps_0, state_features_0 = self.policy_0.obs_to_state(obs['player_0'],ep_params)
+                state_maps_1, state_features_1 = self.policy_1.obs_to_state(obs['player_1'],ep_params)
                 previous_obs = obs
                 
                 cumulated_reward = torch.zeros(2,dtype=torch.float)
@@ -284,8 +335,8 @@ class Luxai_Worker(mp.Process) :
                 for ep_step in range(self.len_episode):
 
                     #Compute action probabilities with masks and sample action
-                    action_0 , value_0, mask_action_0 , mask_dx_0, mask_dy_0  = self.policy_0(state_maps_0,state_features_0,obs['player_0'])
-                    action_1 , value_1, mask_action_1 , mask_dx_1, mask_dy_1  = self.policy_1(state_maps_1,state_features_1,obs['player_1'])
+                    action_0 , value_0, mask_action_0 , mask_dx_0, mask_dy_0  = self.policy_0(state_maps_0,state_features_0,obs['player_0'],ep_params)
+                    action_1 , value_1, mask_action_1 , mask_dx_1, mask_dy_1  = self.policy_1(state_maps_1,state_features_1,obs['player_1'],ep_params)
 
                     # Take a step in the environment
                     action = dict(player_0=np.array(action_0, dtype=int), player_1=np.array(action_1, dtype=int))
@@ -339,29 +390,34 @@ class Luxai_Worker(mp.Process) :
                         self.event.clear()
 
                     # Compute the rewards
-                    next_state_maps_0, next_state_features_0 = obs_to_state(obs['player_0'])
-                    next_state_maps_1, next_state_features_1 = obs_to_state(obs['player_1'])
+                    next_state_maps_0, next_state_features_0 = self.policy_0.obs_to_state(obs['player_0'],ep_params)
+                    next_state_maps_1, next_state_features_1 = self.policy_1.obs_to_state(obs['player_1'],ep_params)
                     episode_start[step_cpt] = 0
+
+                    non_reset_matchs = True
                     
                     if ep_step == 0 :
                         episode_start[step_cpt] = 1
                         reward_memory = reward
-                        rewards[0,step_cpt] += obs['player_0']['team_points'][0]
-                        rewards[1,step_cpt] += obs['player_1']['team_points'][1]
+                        rewards[0,step_cpt] += obs['player_0']['team_points'][0] / 1000
+                        rewards[1,step_cpt] += obs['player_1']['team_points'][1] / 1000
+                        non_reset_matchs = False
 
                     elif reward['player_0'] > reward_memory['player_0'] :
                         reward_memory = reward
-                        rewards[0,step_cpt] += obs['player_0']['team_points'][0] + self.victory_bonus
-                        rewards[1,step_cpt] += obs['player_1']['team_points'][1]
+                        rewards[0,step_cpt] += (obs['player_0']['team_points'][0] + self.victory_bonus) / 1000
+                        rewards[1,step_cpt] += obs['player_1']['team_points'][1] / 1000
+                        non_reset_matchs = False
 
                     elif reward['player_1'] > reward_memory['player_1'] :
                         reward_memory = reward
-                        rewards[0,step_cpt] += obs['player_0']['team_points'][0]
-                        rewards[1,step_cpt] += obs['player_1']['team_points'][1] + self.victory_bonus
+                        rewards[0,step_cpt] += obs['player_0']['team_points'][0] / 1000
+                        rewards[1,step_cpt] += (obs['player_1']['team_points'][1] + self.victory_bonus) / 1000
+                        non_reset_matchs = False
 
                     else :
-                        rewards[0,step_cpt] += obs['player_0']['team_points'][0] - previous_obs['player_0']['team_points'][0]
-                        rewards[1,step_cpt] += obs['player_1']['team_points'][1] - previous_obs['player_1']['team_points'][1]
+                        rewards[0,step_cpt] += (obs['player_0']['team_points'][0] - previous_obs['player_0']['team_points'][0]) / 1000
+                        rewards[1,step_cpt] += (obs['player_1']['team_points'][1] - previous_obs['player_1']['team_points'][1]) / 1000
 
                     new_map_0 = torch.clamp_max(map_0 + torch.from_numpy(obs['player_0']['sensor_mask'].astype(np.float32)),1)
                     new_map_1 = torch.clamp_max(map_1 + torch.from_numpy(obs['player_1']['sensor_mask'].astype(np.float32)),1)
@@ -370,17 +426,22 @@ class Luxai_Worker(mp.Process) :
                     new_enemy_0 = torch.from_numpy(obs['player_0']['units_mask'][1].astype(np.float32))
                     new_enemy_1 = torch.from_numpy(obs['player_1']['units_mask'][0].astype(np.float32))
 
-                    rewards[0,step_cpt] += torch.sum(new_map_0-map_0) / (self.map_width*self.map_height)
-                    rewards[1,step_cpt] += torch.sum(new_map_1-map_1) / (self.map_width*self.map_height)
+                    if non_reset_matchs :
+                        rewards[0,step_cpt] += torch.sum(new_map_0-map_0) / (self.map_width*self.map_height)
+                        rewards[1,step_cpt] += torch.sum(new_map_1-map_1) / (self.map_width*self.map_height)
 
-                    rewards[0,step_cpt] += torch.sum(new_energy_0-energy_0) / (self.max_unit_energy*self.n_units)
-                    rewards[1,step_cpt] += torch.sum(new_energy_1-energy_1) / (self.max_unit_energy*self.n_units)
+                        rewards[0,step_cpt] += torch.sum(new_energy_0-energy_0) / (self.max_unit_energy*self.n_units)
+                        rewards[1,step_cpt] += torch.sum(new_energy_1-energy_1) / (self.max_unit_energy*self.n_units)
 
-                    rewards[0,step_cpt] -= torch.sum(new_energy_1*new_enemy_0 - energy_1*enemy_0) / (self.max_unit_energy*self.n_units)
-                    rewards[1,step_cpt] -= torch.sum(new_energy_0*new_enemy_1 - energy_0*enemy_1) / (self.max_unit_energy*self.n_units)
+                        rewards[0,step_cpt] -= torch.sum(new_energy_1*new_enemy_0 - energy_1*enemy_0) / (self.max_unit_energy*self.n_units)
+                        rewards[1,step_cpt] -= torch.sum(new_energy_0*new_enemy_1 - energy_0*enemy_1) / (self.max_unit_energy*self.n_units)
 
-                    rewards[0,step_cpt] += torch.sum(torch.from_numpy(obs['player_0']['relic_nodes_mask'].astype(np.float32))) / (self.max_relic_nodes)
-                    rewards[1,step_cpt] += torch.sum(torch.from_numpy(obs['player_0']['relic_nodes_mask'].astype(np.float32))) / (self.max_relic_nodes)
+                        rewards[0,step_cpt] += torch.sum(torch.from_numpy(obs['player_0']['relic_nodes_mask'].astype(np.float32))) / (self.max_relic_nodes*10)
+                        rewards[1,step_cpt] += torch.sum(torch.from_numpy(obs['player_0']['relic_nodes_mask'].astype(np.float32))) / (self.max_relic_nodes*10)
+
+                    else :
+                        map_0 = torch.zeros(self.map_width,self.map_height,dtype=torch.float)
+                        map_1 = torch.zeros(self.map_width,self.map_height,dtype=torch.float)
 
                     map_0 = new_map_0
                     map_1 = new_map_1
@@ -460,7 +521,7 @@ if __name__ == "__main__":
 
     n_epochs = int(1e6)
     n_batch = 5
-    num_workers = 6
+    num_workers = 7
     n_episode = num_workers
     n_steps = 100
      
@@ -475,16 +536,13 @@ if __name__ == "__main__":
     step_cpt = 0
     reward_cpt = 0
     
-    writer = SummaryWriter("runs/experiment_5")
+    writer = SummaryWriter("runs/experiment_6")
 
-    obs, _ = env.reset()
-    state_maps,state_features = obs_to_state(obs['player_0'])
-
-    model_0 = Policy(state_maps,state_features, n_action, env.env_params, 'player_0')
+    model_0 = Policy('player_0')
     model_0.share_memory()  # For multiprocessing, the model parameters must be shared
     optimizer_0 = torch.optim.Adam(model_0.parameters(), lr=lr0)
 
-    model_1 = Policy(state_maps,state_features, n_action, env.env_params, 'player_1')
+    model_1 = Policy('player_1')
     model_1.share_memory()  # For multiprocessing, the model parameters must be shared
     optimizer_1 = torch.optim.Adam(model_1.parameters(), lr=lr1)
 
@@ -519,6 +577,8 @@ if __name__ == "__main__":
         # Process the collected experiences
         states_maps_0,states_features_0,actions_0,advantages_0,returns_0,mask_action_0,mask_dx_0,mask_dy_0 = zip(*experiences_0)
         states_maps_1,states_features_1,actions_1,advantages_1,returns_1,mask_action_1,mask_dx_1,mask_dy_1 = zip(*experiences_1)
+
+        event.set()
 
         states_maps_0 = torch.cat(states_maps_0,dim=0)
         states_features_0 = torch.cat(states_features_0,dim=0)
@@ -616,8 +676,6 @@ if __name__ == "__main__":
         print(f"Episode {epoch}, Loss 0 : {loss_0.item()}, Loss 1 : {loss_1.item()}")
 
         del train_data_1, train_data_0, train_loader_0, train_loader_1
-
-        event.set()
 
         if epoch % save_rate == 0 :
             save_path = os.path.join(save_dir, f"policy_0_epoch_{epoch}.pth")
