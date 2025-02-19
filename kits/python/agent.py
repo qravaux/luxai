@@ -29,8 +29,8 @@ class Agent():
         self.policy_0 = Policy(self.player)
         self.policy_1 = Policy(self.player)
 
-        self.policy_0.load_state_dict(torch.load("../../policy/policy_0_epoch_100.pth", weights_only=True))
-        self.policy_1.load_state_dict(torch.load("../../policy/policy_1_epoch_100.pth", weights_only=True))
+        self.policy_0.load_state_dict(torch.load("../../policy/experiment_1/policy_0_epoch_0.pth", weights_only=True))
+        self.policy_1.load_state_dict(torch.load("../../policy/experiment_1/policy_1_epoch_0.pth", weights_only=True))
 
     def act(self, step: int, obs, remainingOverageTime: int = 60):
 
