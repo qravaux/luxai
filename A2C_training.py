@@ -8,8 +8,6 @@ from torch.utils.tensorboard import SummaryWriter
 from policies import Luxai_Agent
 from workers import Luxai_Worker
 
-
-
 class ReplayBuffer(Dataset):
     def __init__(self,states_maps,states_features,actions,advantages,returns,mask_action,mask_dx,mask_dy):
 
@@ -31,26 +29,29 @@ class ReplayBuffer(Dataset):
 if __name__ == "__main__":
 
     print('Initialise training environment...\n')
-    lr0 = 1e-6
-    lr1 = 1e-7
+    lr0 = 1e-5
+    lr1 = 1e-5
     max_norm0 = 0.5
     max_norm1 = 0.5
-    entropy_coef0 = 0.1
-    entropy_coef1 = 0.05
+    entropy_coef0 = 0.01
+    entropy_coef1 = 0.01
+    weight_decay_0 = 0
+    weight_decay_1 = 0
+
 
     batch_size = 100
-    vf_coef = 0.5
-    gamma = 0.99
-    gae_lambda = 0.95
-    save_rate = 100
+    vf_coef = 1
+    gamma = 1
+    gae_lambda = 0.99
+    save_rate = 20
 
-    n_epochs = int(1e6)
+    n_epochs = 10#int(1e6)
     n_batch = 10
     num_workers = 6
     n_episode = 4
     n_steps = 100
 
-    file_name = 'experiment_1'
+    file_name = 'experiment_13'
     save_dir = f"policy/{file_name}"
      
     env = LuxAIS3GymEnv(numpy_output=True)
@@ -67,11 +68,11 @@ if __name__ == "__main__":
 
     model_0 = Luxai_Agent('player_0')
     model_0.share_memory()  # For multiprocessing, the model parameters must be shared
-    optimizer_0 = torch.optim.Adam(model_0.parameters(), lr=lr0)
+    optimizer_0 = torch.optim.Adam(model_0.parameters(), lr=lr0, weight_decay=weight_decay_0)
 
     model_1 = Luxai_Agent('player_1')
     model_1.share_memory()  # For multiprocessing, the model parameters must be shared
-    optimizer_1 = torch.optim.Adam(model_1.parameters(), lr=lr1)
+    optimizer_1 = torch.optim.Adam(model_1.parameters(), lr=lr1, weight_decay=weight_decay_1)
 
     shared_queue = mp.Queue()  # Queue to share data between workers and the main process
     reward_queue = mp.Queue()
@@ -117,6 +118,11 @@ if __name__ == "__main__":
         mask_dx_0 = torch.cat(mask_dx_0,dim=0)
         mask_dy_0 = torch.cat(mask_dy_0,dim=0)
 
+        states_maps_0.requires_grad = False
+        states_features_0.requires_grad = False
+        advantages_0.requires_grad = False
+        returns_0.requires_grad = False
+
         states_maps_1 = torch.cat(states_maps_1,dim=0)
         states_features_1 = torch.cat(states_features_1,dim=0)
         actions_1 = torch.cat(actions_1,dim=0)
@@ -125,6 +131,11 @@ if __name__ == "__main__":
         mask_action_1 = torch.cat(mask_action_1,dim=0)
         mask_dx_1 = torch.cat(mask_dx_1,dim=0)
         mask_dy_1 = torch.cat(mask_dy_1,dim=0)
+
+        states_maps_1.requires_grad = False
+        states_features_1.requires_grad = False
+        advantages_1.requires_grad = False
+        returns_1.requires_grad = False
 
         train_data_0 = ReplayBuffer(states_maps_0,states_features_0,actions_0,advantages_0,returns_0,mask_action_0,mask_dx_0,mask_dy_0)
         train_data_1 = ReplayBuffer(states_maps_1,states_features_1,actions_1,advantages_1,returns_1,mask_action_1,mask_dx_1,mask_dy_1)

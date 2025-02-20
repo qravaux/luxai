@@ -7,7 +7,17 @@ import numpy as np
 
 class Luxai_Worker(mp.Process) :
 
-    def __init__(self, worker_id, shared_queue, policy_0, policy_1, victory_bonus, gamma, gae_lambda, n_steps,reward_queue, event) :
+    def __init__(self, 
+                 worker_id, 
+                 shared_queue, 
+                 policy_0, 
+                 policy_1, 
+                 victory_bonus, 
+                 gamma, 
+                 gae_lambda, 
+                 n_steps,
+                 reward_queue, 
+                 event) :
 
         super(Luxai_Worker, self).__init__()
 
@@ -48,6 +58,7 @@ class Luxai_Worker(mp.Process) :
         self.worker_id = worker_id
 
     def random_seed(self,length):
+        #return(11)
         random.seed()
         min = 10**(length-1)
         max = 9*min + (min-1)
@@ -70,7 +81,7 @@ class Luxai_Worker(mp.Process) :
 
             step_cpt = 0
 
-            while True:
+            while True :
 
                 # Reset the environment and get the initial state
                 obs, _ = self.env.reset(seed=self.random_seed(10))
@@ -92,12 +103,13 @@ class Luxai_Worker(mp.Process) :
 
                 state_maps_0, state_features_0 = self.policy_0.obs_to_state(obs['player_0'],ep_params)
                 state_maps_1, state_features_1 = self.policy_1.obs_to_state(obs['player_1'],ep_params)
+
+                map_memory_0 = state_maps_0[3:]
+                map_memory_1 = state_maps_1[3:]
+
                 previous_obs = obs
                 
                 cumulated_reward = torch.zeros(2,dtype=torch.float)
-
-                map_0 = torch.zeros(self.map_width,self.map_height,dtype=torch.float)
-                map_1 = torch.zeros(self.map_width,self.map_height,dtype=torch.float)
 
                 energy_0 = torch.zeros(self.n_units,1,dtype=torch.float)
                 energy_1 = torch.zeros(self.n_units,1,dtype=torch.float)
@@ -163,8 +175,9 @@ class Luxai_Worker(mp.Process) :
                         self.event.clear()
 
                     # Compute the rewards
-                    next_state_maps_0, next_state_features_0 = self.policy_0.obs_to_state(obs['player_0'],ep_params)
-                    next_state_maps_1, next_state_features_1 = self.policy_1.obs_to_state(obs['player_1'],ep_params)
+                    next_state_maps_0, next_state_features_0 = self.policy_0.obs_to_state(obs['player_0'],ep_params,map_memory_0)
+                    next_state_maps_1, next_state_features_1 = self.policy_1.obs_to_state(obs['player_1'],ep_params,map_memory_1)
+
                     episode_start[step_cpt] = 0
 
                     non_reset_matchs = True
@@ -172,53 +185,44 @@ class Luxai_Worker(mp.Process) :
                     if ep_step == 0 :
                         episode_start[step_cpt] = 1
                         reward_memory = reward
-                        rewards[0,step_cpt] += obs['player_0']['team_points'][0] / 500
-                        rewards[1,step_cpt] += obs['player_1']['team_points'][1] / 500
+                        rewards[0,step_cpt] += obs['player_0']['team_points'][0] / 100
+                        rewards[1,step_cpt] += obs['player_1']['team_points'][1] / 100
                         non_reset_matchs = False
 
                     elif reward['player_0'] > reward_memory['player_0'] :
                         reward_memory = reward
-                        rewards[0,step_cpt] += (obs['player_0']['team_points'][0] + self.victory_bonus) / 500
-                        rewards[1,step_cpt] += obs['player_1']['team_points'][1] / 500
+                        rewards[0,step_cpt] += (obs['player_0']['team_points'][0] + self.victory_bonus) / 100
+                        rewards[1,step_cpt] += obs['player_1']['team_points'][1] / 100
                         non_reset_matchs = False
 
                     elif reward['player_1'] > reward_memory['player_1'] :
                         reward_memory = reward
-                        rewards[0,step_cpt] += obs['player_0']['team_points'][0] / 500
-                        rewards[1,step_cpt] += (obs['player_1']['team_points'][1] + self.victory_bonus) / 500
+                        rewards[0,step_cpt] += obs['player_0']['team_points'][0] / 100
+                        rewards[1,step_cpt] += (obs['player_1']['team_points'][1] + self.victory_bonus) / 100
                         non_reset_matchs = False
 
                     else :
-                        a=0
-                        rewards[0,step_cpt] += (obs['player_0']['team_points'][0] - previous_obs['player_0']['team_points'][0]) / 500
-                        rewards[1,step_cpt] += (obs['player_1']['team_points'][1] - previous_obs['player_1']['team_points'][1]) / 500
+                        rewards[0,step_cpt] += (obs['player_0']['team_points'][0] - previous_obs['player_0']['team_points'][0]) / 100
+                        rewards[1,step_cpt] += (obs['player_1']['team_points'][1] - previous_obs['player_1']['team_points'][1]) / 100
 
-                    new_map_0 = torch.clamp_max(map_0 + torch.from_numpy(obs['player_0']['sensor_mask'].astype(np.float32)),1)
-                    new_map_1 = torch.clamp_max(map_1 + torch.from_numpy(obs['player_1']['sensor_mask'].astype(np.float32)),1)
                     new_energy_0 = torch.from_numpy(obs['player_0']['units']['energy'][0].astype(np.float32))
                     new_energy_1 = torch.from_numpy(obs['player_1']['units']['energy'][1].astype(np.float32))
                     new_enemy_0 = torch.from_numpy(obs['player_0']['units_mask'][1].astype(np.float32))
                     new_enemy_1 = torch.from_numpy(obs['player_1']['units_mask'][0].astype(np.float32))
 
                     if non_reset_matchs :
-                        rewards[0,step_cpt] += torch.sum(new_map_0-map_0) / (self.map_width*self.map_height)
-                        rewards[1,step_cpt] += torch.sum(new_map_1-map_1) / (self.map_width*self.map_height)
+                        rewards[0,step_cpt] += torch.sum(state_maps_0[3]-map_memory_0[0]) / (self.map_width*self.map_height)
+                        rewards[1,step_cpt] += torch.sum(state_maps_1[3]-map_memory_1[0]) / (self.map_width*self.map_height)
 
                         rewards[0,step_cpt] += torch.sum(new_energy_0-energy_0) / (self.max_unit_energy*self.n_units)
                         rewards[1,step_cpt] += torch.sum(new_energy_1-energy_1) / (self.max_unit_energy*self.n_units)
 
-                        rewards[0,step_cpt] -= torch.sum(new_energy_1*new_enemy_0 - energy_1*enemy_0) / (self.max_unit_energy*self.n_units)
-                        rewards[1,step_cpt] -= torch.sum(new_energy_0*new_enemy_1 - energy_0*enemy_1) / (self.max_unit_energy*self.n_units)
+                        rewards[0,step_cpt] -= torch.sum((new_energy_1 - energy_1)*new_enemy_0*enemy_0) / (self.max_unit_energy*torch.sum(new_enemy_0*enemy_0)+1)
+                        rewards[1,step_cpt] -= torch.sum((new_energy_0 - energy_0)*new_enemy_1*enemy_1) / (self.max_unit_energy*torch.sum(new_enemy_1*enemy_1)+1)
 
                         rewards[0,step_cpt] += torch.sum(torch.from_numpy(obs['player_0']['relic_nodes_mask'].astype(np.float32))) / (self.max_relic_nodes*50)
-                        rewards[1,step_cpt] += torch.sum(torch.from_numpy(obs['player_0']['relic_nodes_mask'].astype(np.float32))) / (self.max_relic_nodes*50)
+                        rewards[1,step_cpt] += torch.sum(torch.from_numpy(obs['player_1']['relic_nodes_mask'].astype(np.float32))) / (self.max_relic_nodes*50)                     
 
-                    else :
-                        map_0 = torch.zeros(self.map_width,self.map_height,dtype=torch.float)
-                        map_1 = torch.zeros(self.map_width,self.map_height,dtype=torch.float)
-
-                    map_0 = new_map_0
-                    map_1 = new_map_1
                     energy_0 = new_energy_0
                     energy_1 = new_energy_1
                     enemy_0 = new_enemy_0
@@ -251,6 +255,9 @@ class Luxai_Worker(mp.Process) :
                     state_features_0 = next_state_features_0
                     state_maps_1 = next_state_maps_1
                     state_features_1 = next_state_features_1
+
+                    map_memory_0 = state_maps_0[3:]
+                    map_memory_1 = state_maps_1[3:]
 
                     step_cpt += 1
                     previous_obs = obs
