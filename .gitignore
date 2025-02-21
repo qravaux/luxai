@@ -5,4 +5,6 @@ episodes/
 replays/
 runs/
 policy/
+submission/submission.tar.gz
 kits/python/replay*
+program.prof
