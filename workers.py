@@ -4,7 +4,6 @@ import torch
 import torch.multiprocessing as mp
 import numpy as np
 
-
 class Luxai_Worker(mp.Process) :
 
     def __init__(self, 
@@ -195,25 +194,25 @@ class Luxai_Worker(mp.Process) :
                     if ep_step == 0 :
                         episode_start[step_cpt] = 1
                         reward_memory = reward
-                        rewards[0,step_cpt] += obs['player_0']['team_points'][0] / 100
-                        rewards[1,step_cpt] += obs['player_1']['team_points'][1] / 100
+                        rewards[0,step_cpt] += obs['player_0']['team_points'][0] / 500
+                        rewards[1,step_cpt] += obs['player_1']['team_points'][1] / 500
                         non_reset_matchs = False
 
                     elif reward['player_0'] > reward_memory['player_0'] :
                         reward_memory = reward
-                        rewards[0,step_cpt] += (obs['player_0']['team_points'][0] + self.victory_bonus) / 100
-                        rewards[1,step_cpt] += obs['player_1']['team_points'][1] / 100
+                        rewards[0,step_cpt] += (obs['player_0']['team_points'][0] + self.victory_bonus) / 500
+                        rewards[1,step_cpt] += obs['player_1']['team_points'][1] / 500
                         non_reset_matchs = False
 
                     elif reward['player_1'] > reward_memory['player_1'] :
                         reward_memory = reward
-                        rewards[0,step_cpt] += obs['player_0']['team_points'][0] / 100
-                        rewards[1,step_cpt] += (obs['player_1']['team_points'][1] + self.victory_bonus) / 100
+                        rewards[0,step_cpt] += obs['player_0']['team_points'][0] / 500
+                        rewards[1,step_cpt] += (obs['player_1']['team_points'][1] + self.victory_bonus) / 500
                         non_reset_matchs = False
 
                     else :
-                        rewards[0,step_cpt] += (obs['player_0']['team_points'][0] - previous_obs['player_0']['team_points'][0]) / 100
-                        rewards[1,step_cpt] += (obs['player_1']['team_points'][1] - previous_obs['player_1']['team_points'][1]) / 100
+                        rewards[0,step_cpt] += (obs['player_0']['team_points'][0] - previous_obs['player_0']['team_points'][0]) / 500
+                        rewards[1,step_cpt] += (obs['player_1']['team_points'][1] - previous_obs['player_1']['team_points'][1]) / 500
 
                     cumulated_point[0] += rewards[0,step_cpt]
                     cumulated_point[1] += rewards[1,step_cpt]

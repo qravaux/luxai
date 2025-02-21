@@ -1,10 +1,11 @@
+import os
 import torch
 from torch.utils.data import Dataset, DataLoader
 import torch.nn.functional as F
-import os
-from src.luxai_s3.wrappers import LuxAIS3GymEnv
 import torch.multiprocessing as mp
 from torch.utils.tensorboard import SummaryWriter
+
+from src.luxai_s3.wrappers import LuxAIS3GymEnv
 from policies import Luxai_Agent
 from workers import Luxai_Worker
 
@@ -30,14 +31,13 @@ if __name__ == "__main__":
 
     print('Initialise training environment...\n')
     lr0 = 1e-6
-    lr1 = 1e-6
+    lr1 = 1e-7
     max_norm0 = 0.5
     max_norm1 = 0.5
     entropy_coef0 = 0.05
     entropy_coef1 = 0.05
     weight_decay_0 = 1e-3
     weight_decay_1 = 1e-3
-
 
     batch_size = 100
     vf_coef = 1
@@ -51,7 +51,7 @@ if __name__ == "__main__":
     n_episode = 3
     n_steps = 100
 
-    file_name = 'experiment_1'
+    file_name = 'experiment_2'
     save_dir = f"policy/{file_name}"
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

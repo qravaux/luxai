@@ -1,10 +1,9 @@
-from lux.utils import direction_to
 import sys
 sys.path.append('../../')
+from lux.utils import direction_to
+from lux.kit import to_numpy
 import numpy as np
 from policies import Luxai_Agent
-import torch
-from src.luxai_s3.utils import to_numpy
 import flax.serialization
 
 class Agent():
@@ -42,6 +41,7 @@ class Agent():
                 self.map_memory_0 = state_maps[3:]
             else :
                 state_maps ,state_features = self.policy_0.obs_to_state(good_obs,self.ep_params,self.map_memory_0)
+                self.map_memory_0 = state_maps[3:]
 
             action,_,_,_,_ = self.policy_0(state_maps ,state_features,good_obs,self.ep_params)
             return action.numpy()
@@ -51,6 +51,7 @@ class Agent():
                 self.map_memory_1 = state_maps[3:]
             else :
                 state_maps ,state_features = self.policy_1.obs_to_state(good_obs,self.ep_params,self.map_memory_1)
+                self.map_memory_1 = state_maps[3:]
 
             action,_,_,_,_ = self.policy_1(state_maps ,state_features,good_obs,self.ep_params)
             return action.numpy()

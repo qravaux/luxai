@@ -1,6 +1,4 @@
 from src.luxai_s3.wrappers import LuxAIS3GymEnv
-import pygame
-import time
 from policies import Luxai_Agent
 import torch
 import numpy as np
