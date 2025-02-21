@@ -2,9 +2,9 @@ from lux.utils import direction_to
 import sys
 sys.path.append('../../')
 import numpy as np
-from train import Policy
+from policies import Luxai_Agent
 import torch
-from luxai_s3.utils import to_numpy
+from src.luxai_s3.utils import to_numpy
 import flax.serialization
 
 class Agent():
@@ -26,24 +26,34 @@ class Agent():
         self.discovered_relic_nodes_ids = set()
         self.unit_explore_locations = dict()
 
-        self.policy_0 = Policy(self.player)
-        self.policy_1 = Policy(self.player)
+        self.policy_0 = Luxai_Agent(self.player)
+        self.policy_1 = Luxai_Agent(self.player)
 
-        self.policy_0.load_state_dict(torch.load("../../policy/experiment_1/policy_0_epoch_100.pth", weights_only=True))
-        self.policy_1.load_state_dict(torch.load("../../policy/experiment_1/policy_1_epoch_100.pth", weights_only=True))
+        #self.policy_0.load_state_dict(torch.load("../../policy/experiment_2/policy_0_epoch_120.pth", weights_only=True))
+        #self.policy_1.load_state_dict(torch.load("../../policy/experiment_2/policy_1_epoch_120.pth", weights_only=True))
 
     def act(self, step: int, obs, remainingOverageTime: int = 60):
-
         good_obs = to_numpy(flax.serialization.to_state_dict(obs))
 
         if self.player == "player_0" :
-            state_maps ,state_features = self.policy_0.obs_to_state(good_obs,self.ep_params)
+
+            if step == 0 :
+                state_maps ,state_features = self.policy_0.obs_to_state(good_obs,self.ep_params)
+                self.map_memory_0 = state_maps[3:]
+            else :
+                state_maps ,state_features = self.policy_0.obs_to_state(good_obs,self.ep_params,self.map_memory_0)
+
             action,_,_,_,_ = self.policy_0(state_maps ,state_features,good_obs,self.ep_params)
             return action.numpy()
         else :
-            state_maps ,state_features = self.policy_1.obs_to_state(good_obs,self.ep_params)
+            if step == 0 :
+                state_maps ,state_features = self.policy_1.obs_to_state(good_obs,self.ep_params)
+                self.map_memory_1 = state_maps[3:]
+            else :
+                state_maps ,state_features = self.policy_1.obs_to_state(good_obs,self.ep_params,self.map_memory_1)
+
             action,_,_,_,_ = self.policy_1(state_maps ,state_features,good_obs,self.ep_params)
-            return action  .numpy()   
+            return action.numpy()
 
 
         """

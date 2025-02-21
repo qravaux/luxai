@@ -7,16 +7,14 @@ try:
 except:
     pass
 
-TILE_SIZE = 64
+TILE_SIZE = 32
 
-
-class LuxAIPygameRenderer:
+class LuxAIPygameRenderer():
     def __init__(self):
         pass
 
     def render(self, state: EnvState, params: EnvParams):
         """Render the environment."""
-
         # Initialize Pygame if not already done
         if not pygame.get_init():
             pygame.init()
@@ -24,13 +22,13 @@ class LuxAIPygameRenderer:
             # Set up the display
             screen_width = params.map_width * TILE_SIZE
             screen_height = params.map_height * TILE_SIZE
-            self.screen = pygame.display.set_mode((screen_width, screen_height))
+            self.screen = pygame.display.set_mode(size=(screen_width, screen_height))
             self.surface = pygame.Surface(self.screen.get_size(), pygame.SRCALPHA)
             pygame.display.set_caption("Lux AI Season 3")
 
             self.display_options = {
                 "show_grid": True,
-                "show_relic_spots": False,
+                "show_relic_spots": True,
                 "show_sensor_mask": True,
                 "show_vision_power_map": True,
                 "show_energy_field": False,
@@ -66,6 +64,7 @@ class LuxAIPygameRenderer:
                 break
 
     def _update_display(self, state: EnvState, params: EnvParams):
+
         # Fill the screen with a background color
         self.screen.fill((200, 200, 200))
         self.surface.fill((200, 200, 200, 255))  # Light gray background

@@ -9,16 +9,16 @@ from policies import Luxai_Agent
 from workers import Luxai_Worker
 
 class ReplayBuffer(Dataset):
-    def __init__(self,states_maps,states_features,actions,advantages,returns,mask_action,mask_dx,mask_dy):
+    def __init__(self,states_maps,states_features,actions,advantages,returns,mask_action,mask_dx,mask_dy,device):
 
-        self.states_maps = states_maps
-        self.states_features = states_features
-        self.actions = actions
-        self.advantages = advantages
-        self.returns = returns
-        self.mask_action = mask_action
-        self.mask_dx = mask_dx
-        self.mask_dy = mask_dy
+        self.states_maps = states_maps.to(device)
+        self.states_features = states_features.to(device)
+        self.actions = actions.to(device)
+        self.advantages = advantages.to(device)
+        self.returns = returns.to(device)
+        self.mask_action = mask_action.to(device)
+        self.mask_dx = mask_dx.to(device)
+        self.mask_dy = mask_dy.to(device)
 
     def __len__(self):
         return len(self.states_maps)
@@ -29,14 +29,14 @@ class ReplayBuffer(Dataset):
 if __name__ == "__main__":
 
     print('Initialise training environment...\n')
-    lr0 = 1e-5
-    lr1 = 1e-5
+    lr0 = 1e-6
+    lr1 = 1e-6
     max_norm0 = 0.5
     max_norm1 = 0.5
-    entropy_coef0 = 0.01
-    entropy_coef1 = 0.01
-    weight_decay_0 = 0
-    weight_decay_1 = 0
+    entropy_coef0 = 0.05
+    entropy_coef1 = 0.05
+    weight_decay_0 = 1e-3
+    weight_decay_1 = 1e-3
 
 
     batch_size = 100
@@ -45,15 +45,16 @@ if __name__ == "__main__":
     gae_lambda = 0.99
     save_rate = 20
 
-    n_epochs = 10#int(1e6)
+    n_epochs = int(1e6)
     n_batch = 10
     num_workers = 6
-    n_episode = 4
+    n_episode = 3
     n_steps = 100
 
-    file_name = 'experiment_13'
+    file_name = 'experiment_1'
     save_dir = f"policy/{file_name}"
-     
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     env = LuxAIS3GymEnv(numpy_output=True)
     n_units = env.env_params.max_units
     sap_range = env.env_params.unit_sap_range
@@ -67,21 +68,38 @@ if __name__ == "__main__":
     writer = SummaryWriter(f"runs/{file_name}")
 
     model_0 = Luxai_Agent('player_0')
+    model_0_gpu = Luxai_Agent('player_0')
+    model_0_gpu.load_state_dict(model_0.state_dict())
+    model_0_gpu.cuda(device)
+    optimizer_0 = torch.optim.Adam(model_0_gpu.parameters(), lr=lr0, weight_decay=weight_decay_0)
     model_0.share_memory()  # For multiprocessing, the model parameters must be shared
-    optimizer_0 = torch.optim.Adam(model_0.parameters(), lr=lr0, weight_decay=weight_decay_0)
 
     model_1 = Luxai_Agent('player_1')
+    model_1_gpu = Luxai_Agent('player_1')
+    model_1_gpu.load_state_dict(model_1.state_dict())
+    model_1_gpu.cuda(device)
+    optimizer_1 = torch.optim.Adam(model_1_gpu.parameters(), lr=lr1, weight_decay=weight_decay_1)
     model_1.share_memory()  # For multiprocessing, the model parameters must be shared
-    optimizer_1 = torch.optim.Adam(model_1.parameters(), lr=lr1, weight_decay=weight_decay_1)
 
     shared_queue = mp.Queue()  # Queue to share data between workers and the main process
     reward_queue = mp.Queue()
+    point_queue = mp.Queue()
     event = mp.Event()
 
     print('Instantiate workers...')
     workers = []
     for i in range(num_workers) :
-        worker = Luxai_Worker(i, shared_queue, model_0, model_1, victory_bonus,gamma,gae_lambda,n_steps,reward_queue,event)
+        worker = Luxai_Worker(i,shared_queue,   
+                              reward_queue,
+                              point_queue,
+                              event,
+                              model_0,
+                              model_1,
+                              gamma,
+                              gae_lambda,
+                              n_steps,
+                              n_episode,
+                              victory_bonus,)
         workers.append(worker)
         worker.start()
         print(f'--------worker {i} is ready')
@@ -103,7 +121,7 @@ if __name__ == "__main__":
                 experiences_0.append((states_maps[0],states_features[0],actions[0],advantages[0],returns[0],mask_actions[0],mask_dxs[0],mask_dys[0]))
                 experiences_1.append((states_maps[1],states_features[1],actions[1],advantages[1],returns[1],mask_actions[1],mask_dxs[1],mask_dys[1]))
 
-            event.set()
+        event.set()
 
         # Process the collected experiences
         states_maps_0,states_features_0,actions_0,advantages_0,returns_0,mask_action_0,mask_dx_0,mask_dy_0 = zip(*experiences_0)
@@ -137,8 +155,8 @@ if __name__ == "__main__":
         advantages_1.requires_grad = False
         returns_1.requires_grad = False
 
-        train_data_0 = ReplayBuffer(states_maps_0,states_features_0,actions_0,advantages_0,returns_0,mask_action_0,mask_dx_0,mask_dy_0)
-        train_data_1 = ReplayBuffer(states_maps_1,states_features_1,actions_1,advantages_1,returns_1,mask_action_1,mask_dx_1,mask_dy_1)
+        train_data_0 = ReplayBuffer(states_maps_0,states_features_0,actions_0,advantages_0,returns_0,mask_action_0,mask_dx_0,mask_dy_0,device)
+        train_data_1 = ReplayBuffer(states_maps_1,states_features_1,actions_1,advantages_1,returns_1,mask_action_1,mask_dx_1,mask_dy_1,device)
  
         train_loader_0 = DataLoader(train_data_0, batch_size=batch_size, shuffle=True)
         train_loader_1 = DataLoader(train_data_1, batch_size=batch_size, shuffle=True)
@@ -150,7 +168,7 @@ if __name__ == "__main__":
                 states_maps_,states_features_,actions_,advantages_,returns_,mask_action_,mask_dx_,mask_dy_ = batch
 
                 #Compute log_probs and values
-                values_,log_probs_ = model_0.training_forward(states_maps_,states_features_,actions_,mask_action_,mask_dx_,mask_dy_)
+                values_,log_probs_ = model_0_gpu.training_forward(states_maps_,states_features_,actions_,mask_action_,mask_dx_,mask_dy_)
 
                 advantages_ = (advantages_ - advantages_.mean()) / (advantages_.std() + 1e-8)
 
@@ -164,7 +182,7 @@ if __name__ == "__main__":
                 # Update model
                 optimizer_0.zero_grad()
                 loss_0.backward()
-                torch.nn.utils.clip_grad_norm_(model_0.parameters(), max_norm=max_norm0)
+                torch.nn.utils.clip_grad_norm_(model_0_gpu.parameters(), max_norm=max_norm0)
                 optimizer_0.step()
 
             for batch in train_loader_1 :
@@ -172,7 +190,7 @@ if __name__ == "__main__":
                 states_maps_,states_features_,actions_,advantages_,returns_,mask_action_,mask_dx_,mask_dy_ = batch
 
                 #Compute log_probs and values
-                values_,log_probs_ = model_1.training_forward(states_maps_,states_features_,actions_,mask_action_,mask_dx_,mask_dy_)
+                values_,log_probs_ = model_1_gpu.training_forward(states_maps_,states_features_,actions_,mask_action_,mask_dx_,mask_dy_)
 
                 advantages_ = (advantages_ - advantages_.mean()) / (advantages_.std() + 1e-8)
 
@@ -186,33 +204,43 @@ if __name__ == "__main__":
                 # Update model
                 optimizer_1.zero_grad()
                 loss_1.backward()
-                torch.nn.utils.clip_grad_norm_(model_1.parameters(), max_norm=max_norm1)
+                torch.nn.utils.clip_grad_norm_(model_1_gpu.parameters(), max_norm=max_norm1)
                 optimizer_1.step()
+
+
+        model_0.load_state_dict(model_0_gpu.state_dict())
+        model_1.load_state_dict(model_1_gpu.state_dict())
 
         try :
             while True :
                 reward = reward_queue.get_nowait()
+                point = point_queue.get_nowait()
                 reward_cpt += len_episode
+
                 writer.add_scalar("Reward 0", reward[0].item(), reward_cpt)
                 writer.add_scalar("Reward 1", reward[1].item(), reward_cpt)
+
+                writer.add_scalar("Point 0", point[0].item(), reward_cpt)
+                writer.add_scalar("Point 1", point[1].item(), reward_cpt)
+
         except :
             None
 
         step_cpt += n_episode*n_steps*num_workers
 
-        writer.add_scalar("Loss/Total Loss 0", loss_0.item(), step_cpt)
-        writer.add_scalar("Loss/Total Loss 1", loss_1.item(), step_cpt)
+        writer.add_scalar("Loss/Total Loss 0", loss_0.cpu().item(), step_cpt)
+        writer.add_scalar("Loss/Total Loss 1", loss_1.cpu().item(), step_cpt)
 
-        writer.add_scalar("Loss/Policy Loss 0", policy_loss_0.item(), step_cpt)
-        writer.add_scalar("Loss/Policy Loss 1", policy_loss_1.item(), step_cpt)
+        writer.add_scalar("Loss/Policy Loss 0", policy_loss_0.cpu().item(), step_cpt)
+        writer.add_scalar("Loss/Policy Loss 1", policy_loss_1.cpu().item(), step_cpt)
 
-        writer.add_scalar("Loss/Value Loss 0", value_loss_0.item(), step_cpt)
-        writer.add_scalar("Loss/Value Loss 1", value_loss_1.item(), step_cpt)
+        writer.add_scalar("Loss/Value Loss 0", value_loss_0.cpu().item(), step_cpt)
+        writer.add_scalar("Loss/Value Loss 1", value_loss_1.cpu().item(), step_cpt)
 
-        writer.add_scalar("Loss/Entropy Loss 0", entropy_loss_0.item(), step_cpt)
-        writer.add_scalar("Loss/Entropy Loss 1", entropy_loss_1.item(), step_cpt)
+        writer.add_scalar("Loss/Entropy Loss 0", entropy_loss_0.cpu().item(), step_cpt)
+        writer.add_scalar("Loss/Entropy Loss 1", entropy_loss_1.cpu().item(), step_cpt)
 
-        print(f"Episode {epoch}, Loss 0 : {loss_0.item()}, Loss 1 : {loss_1.item()}")
+        print(f"Episode {epoch}, Loss 0 : {loss_0.cpu().item()}, Loss 1 : {loss_1.cpu().item()}")
 
         del train_data_1, train_data_0, train_loader_0, train_loader_1
 

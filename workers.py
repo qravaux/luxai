@@ -9,15 +9,18 @@ class Luxai_Worker(mp.Process) :
 
     def __init__(self, 
                  worker_id, 
-                 shared_queue, 
+                 shared_queue,
+                 reward_queue,
+                 point_queue,
+                 event,
                  policy_0, 
-                 policy_1, 
-                 victory_bonus, 
+                 policy_1,
                  gamma, 
                  gae_lambda, 
                  n_steps,
-                 reward_queue, 
-                 event) :
+                 n_episode,
+                 victory_bonus,
+                 ) :
 
         super(Luxai_Worker, self).__init__()
 
@@ -32,6 +35,7 @@ class Luxai_Worker(mp.Process) :
         self.gamma = gamma
         self.gae_lambda = gae_lambda
         self.n_steps = n_steps
+        self.n_episode = n_episode
 
         self.sap_range = 8
 
@@ -54,6 +58,7 @@ class Luxai_Worker(mp.Process) :
 
         self.shared_queue = shared_queue
         self.reward_queue = reward_queue
+        self.point_queue = point_queue
         self.event = event
         self.worker_id = worker_id
 
@@ -80,6 +85,7 @@ class Luxai_Worker(mp.Process) :
             mask_dys = torch.zeros(2,self.n_steps,self.n_units,self.sap_range*2+1,dtype=torch.int8)
 
             step_cpt = 0
+            episode_cpt = 0
 
             while True :
 
@@ -110,6 +116,7 @@ class Luxai_Worker(mp.Process) :
                 previous_obs = obs
                 
                 cumulated_reward = torch.zeros(2,dtype=torch.float)
+                cumulated_point = torch.zeros(2,dtype=torch.float)
 
                 energy_0 = torch.zeros(self.n_units,1,dtype=torch.float)
                 energy_1 = torch.zeros(self.n_units,1,dtype=torch.float)
@@ -129,7 +136,7 @@ class Luxai_Worker(mp.Process) :
 
                     # If the Buffer is full, send collected trajectories to the Queue
                     if step_cpt == self.n_steps :
-                        
+
                         # Advantage computation
                         advantages = torch.zeros(2,self.n_steps,1,dtype=torch.float)                    
                         last_gae_lam_0 = 0
@@ -170,9 +177,12 @@ class Luxai_Worker(mp.Process) :
                         mask_actions = torch.zeros(2,self.n_steps,self.n_units,self.n_action,dtype=torch.int8)
                         mask_dxs = torch.zeros(2,self.n_steps,self.n_units,self.sap_range*2+1,dtype=torch.int8)
                         mask_dys = torch.zeros(2,self.n_steps,self.n_units,self.sap_range*2+1,dtype=torch.int8)
-
-                        self.event.wait()
-                        self.event.clear()
+                        
+                        episode_cpt += 1
+                        if episode_cpt == self.n_episode :
+                            self.event.wait()
+                            self.event.clear()
+                            episode_cpt = 0
 
                     # Compute the rewards
                     next_state_maps_0, next_state_features_0 = self.policy_0.obs_to_state(obs['player_0'],ep_params,map_memory_0)
@@ -204,6 +214,9 @@ class Luxai_Worker(mp.Process) :
                     else :
                         rewards[0,step_cpt] += (obs['player_0']['team_points'][0] - previous_obs['player_0']['team_points'][0]) / 100
                         rewards[1,step_cpt] += (obs['player_1']['team_points'][1] - previous_obs['player_1']['team_points'][1]) / 100
+
+                    cumulated_point[0] += rewards[0,step_cpt]
+                    cumulated_point[1] += rewards[1,step_cpt]
 
                     new_energy_0 = torch.from_numpy(obs['player_0']['units']['energy'][0].astype(np.float32))
                     new_energy_1 = torch.from_numpy(obs['player_1']['units']['energy'][1].astype(np.float32))
@@ -263,3 +276,4 @@ class Luxai_Worker(mp.Process) :
                     previous_obs = obs
 
                 self.reward_queue.put(cumulated_reward)
+                self.point_queue.put(cumulated_point)
