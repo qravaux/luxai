@@ -50,7 +50,7 @@ if __name__ == "__main__":
 
     n_epochs = int(1e6)
     n_batch = 10
-    num_workers = 6
+    num_workers = 3
     n_episode = 5
     n_steps = 100
 

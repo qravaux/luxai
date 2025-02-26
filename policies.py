@@ -200,7 +200,8 @@ class Luxai_Agent(nn.Module) :
         return state_maps , state_features
 
     def training_forward(self,x_maps,x_features,action,mask_action,mask_dx,mask_dy) :
-
+        
+        batch_size = x_features.size(0)
         x = self.activation(self.cnn_inputs(x_maps))
         x = self.max_pooling(x)
         for layer in self.cnn_hidden :
@@ -212,9 +213,9 @@ class Luxai_Agent(nn.Module) :
         for layer in self.hidden_actor :
             x = self.activation(layer(x))
 
-        actor_action = torch.nan_to_num(self.actor_action(x).view(self.n_units,self.n_action) - torch.nan_to_num(mask_action*torch.inf))
-        actor_dx = torch.nan_to_num(self.actor_dx(x).view(self.n_units,self.max_sap_range*2+1) - torch.nan_to_num(mask_dx*torch.inf))
-        actor_dy = torch.nan_to_num(self.actor_dy(x).view(self.n_units,self.max_sap_range*2+1) - torch.nan_to_num(mask_dy*torch.inf))
+        actor_action = torch.nan_to_num(self.actor_action(x).view(batch_size,self.n_units,self.n_action) - torch.nan_to_num(mask_action*torch.inf))
+        actor_dx = torch.nan_to_num(self.actor_dx(x).view(batch_size,self.n_units,self.max_sap_range*2+1) - torch.nan_to_num(mask_dx*torch.inf))
+        actor_dy = torch.nan_to_num(self.actor_dy(x).view(batch_size,self.n_units,self.max_sap_range*2+1) - torch.nan_to_num(mask_dy*torch.inf))
 
         actor_action = torch.nan_to_num(F.log_softmax(actor_action,dim=-1))
         actor_dx = torch.nan_to_num(F.log_softmax(actor_dx,dim=-1))
@@ -227,7 +228,7 @@ class Luxai_Agent(nn.Module) :
 
         # Computing log probabilities for the actions
 
-        batch_size = actor_action.size(0)
+        
 
         step_indices = torch.arange(batch_size).unsqueeze(1).expand(-1, self.n_units)
         unit_indices = torch.arange(self.n_units).unsqueeze(0).expand(batch_size, -1) 
@@ -288,7 +289,7 @@ class Luxai_Agent(nn.Module) :
             correct_move_direction = (((target_tiles >= 0) & (target_tiles <= 23)).all(dim=-1)) & (target_tiles_type != 2)
             forbidden_move = 1 - correct_move_direction.int() 
             mask_action[:,1:-1] += forbidden_move
-            
+            mask_action[:,0] = 0
             
             actor_action = torch.nan_to_num(self.actor_action(x).view(self.n_units,self.n_action) - torch.nan_to_num(mask_action*torch.inf))
             actor_action = torch.nan_to_num(F.log_softmax(actor_action,dim=-1))
@@ -297,12 +298,12 @@ class Luxai_Agent(nn.Module) :
             sap_mask =  sap_mask | (action_choice !=5)
 
             mask_dx[:,:self.max_sap_range-ep_params['unit_sap_range']] += 1
-            mask_dx[:,self.max_sap_range+ep_params['unit_sap_range']:] += 1
+            mask_dx[:,self.max_sap_range+ep_params['unit_sap_range']+1:] += 1
             mask_dy[:,:self.max_sap_range-ep_params['unit_sap_range']] += 1
-            mask_dy[:,self.max_sap_range+ep_params['unit_sap_range']:] += 1
+            mask_dy[:,self.max_sap_range+ep_params['unit_sap_range']+1:] += 1
 
-            mask_dx[torch.where(sap_mask)[0]] += 1
-            mask_dy[torch.where(sap_mask)[0]] += 1
+            mask_dx[torch.argwhere(sap_mask)] += 1
+            mask_dy[torch.argwhere(sap_mask)] += 1
 
             directions = torch.arange(-ep_params['unit_sap_range'],ep_params['unit_sap_range']+1).view(2*ep_params['unit_sap_range']+1)
             expand_postion = state['units'].unsqueeze(1).expand(self.n_units,2*ep_params['unit_sap_range']+1,2).clone()

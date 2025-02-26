@@ -57,7 +57,7 @@ if __name__ == "__main__":
     n_episode = 5
     n_steps = 100
 
-    file_name = 'exploit_1_unit_PPO'
+    file_name = 'A2C_unit_reward'
     save_dir = f"policy/{file_name}"
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
