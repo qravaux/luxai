@@ -6,5 +6,5 @@ replays/
 runs/
 policy/
 submission/submission.tar.gz
-kits/python/replay*
+replay*
 program.prof

@@ -25,13 +25,15 @@ class Luxai_Agent(nn.Module) :
         self.map_height = 24
         self.map_width = 24
 
-        self.actor_size = [2048,1024,256,64]
-        self.cnn_channels = [16,32,64]
+        self.actor_size = [2048,512,128]
+        self.cnn_channels = [8,16,32]
         self.cnn_kernels = [9,5,3]
         self.cnn_strides = [1,1,1]
-        self.critic_size = [2048,1024,256,64]
+        self.critic_size = [2048,512,128]
 
-        self.activation = nn.ReLU()
+        self.activation = nn.Tanh()
+        self.gain = 5/3 #For Tanh and sqrt(2) for ReLu
+
         self.max_pooling = nn.MaxPool2d(kernel_size=2)
 
         self.cnn_inputs = nn.Conv2d(self.n_input_maps,
@@ -69,6 +71,40 @@ class Luxai_Agent(nn.Module) :
         self.inputs_critic = nn.Linear(self.n_input_features,self.critic_size[0],dtype=torch.float)
         self.hidden_critic = nn.ModuleList([nn.Linear(self.critic_size[i],self.critic_size[i+1],dtype=torch.float) for i in range(len(self.critic_size)-1)])
         self.outputs_critic = nn.Linear(self.critic_size[-1],1,dtype=torch.float)
+
+        #Initialization
+        nn.init.orthogonal_(self.cnn_inputs.weight,gain=self.gain)
+        nn.init.zeros_(self.cnn_inputs.bias)
+
+        for layers in self.cnn_hidden :
+            nn.init.orthogonal_(layers.weight,gain=self.gain)
+            nn.init.zeros_(layers.bias)
+
+        nn.init.orthogonal_(self.inputs_actor.weight,gain=self.gain)
+        nn.init.zeros_(self.inputs_actor.bias)
+
+        for layers in self.hidden_actor :
+            nn.init.orthogonal_(layers.weight,gain=self.gain)
+            nn.init.zeros_(layers.bias)
+
+        nn.init.orthogonal_(self.inputs_critic.weight,gain=self.gain)
+        nn.init.zeros_(self.inputs_critic.bias)
+
+        for layers in self.hidden_critic :
+            nn.init.orthogonal_(layers.weight,gain=self.gain)
+            nn.init.zeros_(layers.bias)
+
+        nn.init.orthogonal_(self.actor_action.weight,gain=0.01)
+        nn.init.zeros_(self.actor_action.bias)
+
+        nn.init.orthogonal_(self.actor_dx.weight,gain=0.01)
+        nn.init.zeros_(self.actor_dx.bias)
+
+        nn.init.orthogonal_(self.actor_dy.weight,gain=0.01)
+        nn.init.zeros_(self.actor_dy.bias)
+
+        nn.init.orthogonal_(self.outputs_critic.weight,gain=1)
+        nn.init.zeros_(self.outputs_critic.bias)
 
     def obs_to_state(self,obs:dict,ep_params:dict,map_memory=None) -> torch.Tensor:
 
@@ -137,10 +173,9 @@ class Luxai_Agent(nn.Module) :
         # Computing log probabilities for the actions
 
         batch_size = actor_action.size(0)
-        n_units = actor_action.size(1)
 
-        step_indices = torch.arange(batch_size).unsqueeze(1).expand(-1, n_units)
-        unit_indices = torch.arange(n_units).unsqueeze(0).expand(batch_size, -1) 
+        step_indices = torch.arange(batch_size).unsqueeze(1).expand(-1, self.n_units)
+        unit_indices = torch.arange(self.n_units).unsqueeze(0).expand(batch_size, -1) 
 
         log_prob = torch.sum(actor_action[step_indices,unit_indices, action[:,:, 0]],axis=1,dtype=torch.float)
         log_prob += torch.sum(actor_dx[step_indices,unit_indices, action[:,:, 1]+self.max_sap_range],axis=1,dtype=torch.float)
@@ -234,5 +269,13 @@ class Luxai_Agent(nn.Module) :
                 x = self.activation(layer(x))
             value = self.outputs_critic(x)
 
-        return action, value, mask_action, mask_dx, mask_dy
+            # Computing log probabilities for the actions
+
+            unit_indices = torch.arange(self.n_units) 
+
+            log_prob = torch.sum(actor_action[unit_indices, action[:, 0]],dtype=torch.float)
+            log_prob += torch.sum(actor_dx[unit_indices, action[:, 1]+self.max_sap_range],dtype=torch.float)
+            log_prob += torch.sum(actor_dy[unit_indices, action[:, 2]+self.max_sap_range],dtype=torch.float)
+
+        return action, value, mask_action, mask_dx, mask_dy, log_prob
     

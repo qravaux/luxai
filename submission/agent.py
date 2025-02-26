@@ -3,6 +3,7 @@ from lux.policies import Luxai_Agent
 from lux.utils import direction_to
 from lux.kit import to_numpy
 import flax.serialization
+import torch
 
 class Agent():
     def __init__(self, player: str, env_cfg) -> None:
@@ -26,8 +27,8 @@ class Agent():
         self.policy_0 = Luxai_Agent(self.player)
         self.policy_1 = Luxai_Agent(self.player)
 
-        #self.policy_0.load_state_dict(torch.load("../../policy/experiment_2/policy_0_epoch_120.pth", weights_only=True))
-        #self.policy_1.load_state_dict(torch.load("../../policy/experiment_2/policy_1_epoch_120.pth", weights_only=True))
+        self.policy_0.load_state_dict(torch.load("policy/policy_0_epoch_180.pth", weights_only=True))
+        self.policy_1.load_state_dict(torch.load("policy/policy_1_epoch_180.pth", weights_only=True))
 
     def act(self, step: int, obs, remainingOverageTime: int = 60):
         good_obs = to_numpy(flax.serialization.to_state_dict(obs))
@@ -41,7 +42,7 @@ class Agent():
                 state_maps ,state_features = self.policy_0.obs_to_state(good_obs,self.ep_params,self.map_memory_0)
                 self.map_memory_0 = state_maps[3:]
 
-            action,_,_,_,_ = self.policy_0(state_maps ,state_features,good_obs,self.ep_params)
+            action,_,_,_,_,_ = self.policy_0(state_maps ,state_features,good_obs,self.ep_params)
             return action.numpy()
         else :
             if step == 0 :
@@ -51,5 +52,5 @@ class Agent():
                 state_maps ,state_features = self.policy_1.obs_to_state(good_obs,self.ep_params,self.map_memory_1)
                 self.map_memory_1 = state_maps[3:]
 
-            action,_,_,_,_ = self.policy_1(state_maps ,state_features,good_obs,self.ep_params)
+            action,_,_,_,_,_ = self.policy_1(state_maps ,state_features,good_obs,self.ep_params)
             return action.numpy()
