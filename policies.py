@@ -2,6 +2,7 @@ import scipy.signal
 import torch.nn as nn
 import torch.nn.functional as F
 import torch
+import math
 import numpy as np
 from torch.distributions import Categorical
 import scipy
@@ -33,9 +34,10 @@ class Luxai_Agent(nn.Module) :
         self.cnn_kernels = [9,5,3]
         self.cnn_strides = [1,1,1]
         self.critic_size = [2048,512,128]
-
-        self.activation = nn.Tanh()
-        self.gain = 5/3 #For Tanh and sqrt(2) for ReLu
+        
+        self.final_activation = nn.Tanh()
+        self.activation = nn.ELU() #nn.ReLU(), to try ELU, Softplus
+        self.gain = math.sqrt(2) # 5/3 For Tanh and sqrt(2) for ReLU
 
         self.max_pooling = nn.MaxPool2d(kernel_size=2)
 
@@ -67,9 +69,9 @@ class Luxai_Agent(nn.Module) :
         self.inputs_actor = nn.Linear(self.n_input_features,self.actor_size[0],dtype=torch.float)
         self.hidden_actor = nn.ModuleList([nn.Linear(self.actor_size[i],self.actor_size[i+1],dtype=torch.float) for i in range(len(self.actor_size)-1)])
 
-        self.actor_action = nn.Linear(self.actor_size[-1],self.n_action*self.n_units,dtype=torch.float)
-        self.actor_dx = nn.Linear(self.actor_size[-1],(self.max_sap_range*2+1)*self.n_units,dtype=torch.float)
-        self.actor_dy = nn.Linear(self.actor_size[-1],(self.max_sap_range*2+1)*self.n_units,dtype=torch.float)
+        self.actor_action_layer = nn.Linear(self.actor_size[-1],self.n_action*self.n_units,dtype=torch.float)
+        self.actor_dx_layer = nn.Linear(self.actor_size[-1],(self.max_sap_range*2+1)*self.n_units,dtype=torch.float)
+        self.actor_dy_layer = nn.Linear(self.actor_size[-1],(self.max_sap_range*2+1)*self.n_units,dtype=torch.float)
 
         self.inputs_critic = nn.Linear(self.n_input_features,self.critic_size[0],dtype=torch.float)
         self.hidden_critic = nn.ModuleList([nn.Linear(self.critic_size[i],self.critic_size[i+1],dtype=torch.float) for i in range(len(self.critic_size)-1)])
@@ -97,14 +99,14 @@ class Luxai_Agent(nn.Module) :
             nn.init.orthogonal_(layers.weight,gain=self.gain)
             nn.init.zeros_(layers.bias)
 
-        nn.init.orthogonal_(self.actor_action.weight,gain=0.01)
-        nn.init.zeros_(self.actor_action.bias)
+        nn.init.orthogonal_(self.actor_action_layer.weight,gain=0.01)
+        nn.init.zeros_(self.actor_action_layer.bias)
 
-        nn.init.orthogonal_(self.actor_dx.weight,gain=0.01)
-        nn.init.zeros_(self.actor_dx.bias)
+        nn.init.orthogonal_(self.actor_dx_layer.weight,gain=0.01)
+        nn.init.zeros_(self.actor_dx_layer.bias)
 
-        nn.init.orthogonal_(self.actor_dy.weight,gain=0.01)
-        nn.init.zeros_(self.actor_dy.bias)
+        nn.init.orthogonal_(self.actor_dy_layer.weight,gain=0.01)
+        nn.init.zeros_(self.actor_dy_layer.bias)
 
         nn.init.orthogonal_(self.outputs_critic.weight,gain=1)
         nn.init.zeros_(self.outputs_critic.bias)
@@ -213,13 +215,13 @@ class Luxai_Agent(nn.Module) :
         for layer in self.hidden_actor :
             x = self.activation(layer(x))
 
-        actor_action = torch.nan_to_num(self.actor_action(x).view(batch_size,self.n_units,self.n_action) - torch.nan_to_num(mask_action*torch.inf))
-        actor_dx = torch.nan_to_num(self.actor_dx(x).view(batch_size,self.n_units,self.max_sap_range*2+1) - torch.nan_to_num(mask_dx*torch.inf))
-        actor_dy = torch.nan_to_num(self.actor_dy(x).view(batch_size,self.n_units,self.max_sap_range*2+1) - torch.nan_to_num(mask_dy*torch.inf))
+        actor_action = self.actor_action_layer(x).view(batch_size,self.n_units,self.n_action) - mask_action*1e8
+        actor_dx = self.actor_dx_layer(x).view(batch_size,self.n_units,self.max_sap_range*2+1) - mask_dx*1e8
+        actor_dy = self.actor_dy_layer(x).view(batch_size,self.n_units,self.max_sap_range*2+1) - mask_dy*1e8
 
-        actor_action = torch.nan_to_num(F.log_softmax(actor_action,dim=-1))
-        actor_dx = torch.nan_to_num(F.log_softmax(actor_dx,dim=-1))
-        actor_dy = torch.nan_to_num(F.log_softmax(actor_dy,dim=-1))
+        actor_action = F.log_softmax(actor_action,dim=-1)
+        actor_dx = F.log_softmax(actor_dx,dim=-1)
+        actor_dy = F.log_softmax(actor_dy,dim=-1)
 
         x = self.activation(self.inputs_critic(x_input))
         for layer in self.hidden_critic :
@@ -227,11 +229,8 @@ class Luxai_Agent(nn.Module) :
         value = self.outputs_critic(x)
 
         # Computing log probabilities for the actions
-
-        
-
-        step_indices = torch.arange(batch_size).unsqueeze(1).expand(-1, self.n_units)
-        unit_indices = torch.arange(self.n_units).unsqueeze(0).expand(batch_size, -1) 
+        step_indices = torch.arange(batch_size).unsqueeze(1).expand(batch_size, self.n_units)
+        unit_indices = torch.arange(self.n_units).unsqueeze(0).expand(batch_size, self.n_units) 
 
         log_prob = actor_action[step_indices,unit_indices, action[:,:, 0]]
         log_prob += actor_dx[step_indices,unit_indices, action[:,:, 1]+self.max_sap_range]
@@ -291,8 +290,8 @@ class Luxai_Agent(nn.Module) :
             mask_action[:,1:-1] += forbidden_move
             mask_action[:,0] = 0
             
-            actor_action = torch.nan_to_num(self.actor_action(x).view(self.n_units,self.n_action) - torch.nan_to_num(mask_action*torch.inf))
-            actor_action = torch.nan_to_num(F.log_softmax(actor_action,dim=-1))
+            actor_action = self.actor_action_layer(x).view(self.n_units,self.n_action) - mask_action*1e8
+            actor_action = F.log_softmax(actor_action,dim=-1)
             action_choice = Categorical(logits=actor_action).sample()
 
             sap_mask =  sap_mask | (action_choice !=5)
@@ -319,10 +318,10 @@ class Luxai_Agent(nn.Module) :
             mask_dx[:,self.max_sap_range] = 0
             mask_dy[:,self.max_sap_range] = 0
 
-            actor_dx = torch.nan_to_num(self.actor_dx(x).view(self.n_units,self.max_sap_range*2+1) - torch.nan_to_num(mask_dx*torch.inf))
-            actor_dy = torch.nan_to_num(self.actor_dy(x).view(self.n_units,self.max_sap_range*2+1) - torch.nan_to_num(mask_dy*torch.inf))
-            actor_dx = torch.nan_to_num(F.log_softmax(actor_dx,dim=-1))
-            actor_dy = torch.nan_to_num(F.log_softmax(actor_dy,dim=-1))
+            actor_dx = self.actor_dx_layer(x).view(self.n_units,self.max_sap_range*2+1) - mask_dx*1e8
+            actor_dy = self.actor_dy_layer(x).view(self.n_units,self.max_sap_range*2+1) - mask_dy*1e8
+            actor_dx = F.log_softmax(actor_dx,dim=-1)
+            actor_dy = F.log_softmax(actor_dy,dim=-1)
 
             # Sampling action based on the policy
             action = torch.zeros(self.n_units, 3, dtype=torch.int)
@@ -337,7 +336,6 @@ class Luxai_Agent(nn.Module) :
             value = self.outputs_critic(x)
 
             # Computing log probabilities for the actions
-
             unit_indices = torch.arange(self.n_units) 
 
             log_prob = actor_action[unit_indices, action[:, 0]]

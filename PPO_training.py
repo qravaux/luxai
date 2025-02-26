@@ -32,8 +32,8 @@ class ReplayBuffer(Dataset):
 if __name__ == "__main__":
 
     print('Initialise training environment...\n')
-    lr0 = 1e-6
-    lr1 = 5e-7
+    lr0 = 1e-5
+    lr1 = 5e-6
     max_norm0 = 0.5
     max_norm1 = 0.5
     entropy_coef0 = 0.05
@@ -53,11 +53,11 @@ if __name__ == "__main__":
     save_rate = 100
     n_epochs = int(1e6)
     n_batch = 10
-    num_workers = 3
+    num_workers = 6
     n_episode = 5
     n_steps = 100
 
-    file_name = 'A2C_unit_reward'
+    file_name = 'PPO_unit_reward'
     save_dir = f"policy/{file_name}"
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -185,9 +185,9 @@ if __name__ == "__main__":
 
                 # Losses
                 ratio = torch.exp(log_probs_-p_log_probs_)
-                policy_loss_0 = -torch.mean(torch.min(advantages_ * ratio, advantages_ * torch.clamp(ratio,1-clip_coef,1+clip_coef)).flatten())
-                entropy_loss_0 = -torch.mean((torch.exp(log_probs_) * log_probs_).flatten())  
-                value_loss_0 = torch.mean(torch.pow(values_ - returns_,2).flatten())
+                policy_loss_0 = -torch.mean(torch.min(advantages_ * ratio, advantages_ * torch.clamp(ratio,1-clip_coef,1+clip_coef)))
+                entropy_loss_0 = -torch.mean(torch.exp(log_probs_) * log_probs_)
+                value_loss_0 = torch.mean(torch.pow(values_ - returns_,2))
 
                 loss_0 = policy_loss_0 + vf_coef *value_loss_0 + entropy_coef0 * entropy_loss_0
 
@@ -208,9 +208,9 @@ if __name__ == "__main__":
 
                 # Losses
                 ratio = torch.exp(log_probs_-p_log_probs_)
-                policy_loss_1 = -torch.mean(torch.min(advantages_ * ratio, advantages_ * torch.clamp(ratio,1-clip_coef,1+clip_coef)).flatten())
-                entropy_loss_1 = -torch.mean((torch.exp(log_probs_) * log_probs_).flatten())  
-                value_loss_1 = torch.mean(torch.pow(values_ - returns_,2).flatten())
+                policy_loss_1 = -torch.mean(torch.min(advantages_ * ratio, advantages_ * torch.clamp(ratio,1-clip_coef,1+clip_coef)))
+                entropy_loss_1 = -torch.mean(torch.exp(log_probs_) * log_probs_)  
+                value_loss_1 = torch.mean(torch.pow(values_ - returns_,2))
 
                 loss_1 = policy_loss_1 + vf_coef *value_loss_1 + entropy_coef1 * entropy_loss_1
 

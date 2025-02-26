@@ -50,7 +50,7 @@ if __name__ == "__main__":
 
     n_epochs = int(1e6)
     n_batch = 10
-    num_workers = 3
+    num_workers = 6
     n_episode = 5
     n_steps = 100
 
@@ -177,9 +177,9 @@ if __name__ == "__main__":
                 advantages_ = (advantages_ - torch.mean(advantages_,dim=0)) / (torch.std(advantages_,dim=0) + 1e-8)
 
                 # Losses
-                entropy_loss_0 = -torch.mean((torch.exp(log_probs_) * log_probs_).flatten())
-                policy_loss_0 = -torch.mean((log_probs_ * advantages_).flatten())
-                value_loss_0 = torch.mean(torch.pow(values_ - returns_,2).flatten())
+                entropy_loss_0 = -torch.mean(torch.exp(log_probs_) * log_probs_)
+                policy_loss_0 = -torch.mean(log_probs_ * advantages_)
+                value_loss_0 = torch.mean(torch.pow(values_ - returns_,2))
 
                 loss_0 = policy_loss_0 + vf_coef *value_loss_0 + entropy_coef0 * entropy_loss_0
 
@@ -199,9 +199,9 @@ if __name__ == "__main__":
                 advantages_ = (advantages_ - torch.mean(advantages_,dim=0)) / (torch.std(advantages_,dim=0) + 1e-8)
 
                 # Losses
-                entropy_loss_1 = -torch.mean((torch.exp(log_probs_) * log_probs_).flatten())
-                policy_loss_1 = -torch.mean((log_probs_ * advantages_).flatten())
-                value_loss_1 = torch.mean(torch.pow(values_ - returns_,2).flatten())
+                entropy_loss_1 = -torch.mean(torch.exp(log_probs_) * log_probs_)
+                policy_loss_1 = -torch.mean(log_probs_ * advantages_)
+                value_loss_1 = torch.mean(torch.pow(values_ - returns_,2))
 
                 loss_1 = policy_loss_1 + vf_coef *value_loss_1 + entropy_coef1 * entropy_loss_1
 
