@@ -22,6 +22,9 @@ class ReplayBuffer(Dataset):
         self.mask_dx = mask_dx.to(device)
         self.mask_dy = mask_dy.to(device)
 
+    def add_item(self,states_maps,states_features,actions,advantages,returns,mask_action,mask_dx,mask_dy,device) :
+        
+        
     def __len__(self):
         return len(self.states_maps)
 
@@ -31,27 +34,27 @@ class ReplayBuffer(Dataset):
 if __name__ == "__main__":
 
     print('Initialise training environment...\n')
-    lr0 = 1e-6
-    lr1 = 5e-7
+    lr0 = 1e-8
+    lr1 = 1e-7
     max_norm0 = 0.5
     max_norm1 = 0.5
-    entropy_coef0 = 0.05
-    entropy_coef1 = 0.05
+    entropy_coef0 = 0.001
+    entropy_coef1 = 0.001
     weight_decay_0 = 0
     weight_decay_1 = 0
     eps = 1e-8
     betas = (0.9,0.999)
 
     batch_size = 100
-    vf_coef = 1
-    gamma = 1
+    vf_coef = 0.5
+    gamma = 0.995
     gae_lambda = 0.99
-    save_rate = 100
+    save_rate = 20
 
     n_epochs = int(1e6)
-    n_batch = 10
+    n_batch = 5
     num_workers = 6
-    n_episode = 5
+    n_episode = 3
     n_steps = 100
 
     file_name = 'A2C_unit_reward'
@@ -168,14 +171,12 @@ if __name__ == "__main__":
         for _ in range(n_batch) :
 
             for batch in train_loader_0 :
-
                 states_maps_,states_features_,actions_,advantages_,returns_,mask_action_,mask_dx_,mask_dy_ = batch
 
                 #Compute log_probs and values
                 values_,log_probs_ = model_0_gpu.training_forward(states_maps_,states_features_,actions_,mask_action_,mask_dx_,mask_dy_)
-
-                advantages_ = (advantages_ - torch.mean(advantages_,dim=0)) / (torch.std(advantages_,dim=0) + 1e-8)
-
+                #advantages_ = (advantages_ - torch.mean(advantages_,dim=0)) / (torch.std(advantages_,dim=0) + 1e-8)
+            
                 # Losses
                 entropy_loss_0 = -torch.mean(torch.exp(log_probs_) * log_probs_)
                 policy_loss_0 = -torch.mean(log_probs_ * advantages_)
@@ -190,13 +191,11 @@ if __name__ == "__main__":
                 optimizer_0.step()
 
             for batch in train_loader_1 :
-
                 states_maps_,states_features_,actions_,advantages_,returns_,mask_action_,mask_dx_,mask_dy_ = batch
 
                 #Compute log_probs and values
                 values_,log_probs_ = model_1_gpu.training_forward(states_maps_,states_features_,actions_,mask_action_,mask_dx_,mask_dy_)
-
-                advantages_ = (advantages_ - torch.mean(advantages_,dim=0)) / (torch.std(advantages_,dim=0) + 1e-8)
+                #advantages_ = (advantages_ - torch.mean(advantages_,dim=0)) / (torch.std(advantages_,dim=0) + 1e-8)
 
                 # Losses
                 entropy_loss_1 = -torch.mean(torch.exp(log_probs_) * log_probs_)

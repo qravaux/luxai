@@ -32,22 +32,21 @@ class ReplayBuffer(Dataset):
 if __name__ == "__main__":
 
     print('Initialise training environment...\n')
-    lr0 = 1e-5
-    lr1 = 5e-6
+    lr0 = 1e-6
+    lr1 = 1e-7
     max_norm0 = 0.5
     max_norm1 = 0.5
-    entropy_coef0 = 0.05
-    entropy_coef1 = 0.05
-    weight_decay_0 = 1e-3
-    weight_decay_1 = 1e-3
+    entropy_coef0 = 0.001
+    entropy_coef1 = 0.001
+    weight_decay_0 = 0
+    weight_decay_1 = 0
+    eps = 1e-8
+    betas = (0.9,0.999)
 
     clip_coef = 0.2
     vf_coef = 1
-    gamma = 1
+    gamma = 0.995
     gae_lambda = 0.99
-
-    eps = 1e-8
-    betas = (0.9,0.999)
 
     batch_size = 100
     save_rate = 100
@@ -128,8 +127,6 @@ if __name__ == "__main__":
                 experiences_0.append((states_maps[0],states_features[0],actions[0],advantages[0],returns[0],mask_actions[0],mask_dxs[0],mask_dys[0],log_probs[0]))
                 experiences_1.append((states_maps[1],states_features[1],actions[1],advantages[1],returns[1],mask_actions[1],mask_dxs[1],mask_dys[1],log_probs[1]))
 
-        event.set()
-
         # Process the collected experiences
         states_maps_0,states_features_0,actions_0,advantages_0,returns_0,mask_action_0,mask_dx_0,mask_dy_0,log_probs_0 = zip(*experiences_0)
         states_maps_1,states_features_1,actions_1,advantages_1,returns_1,mask_action_1,mask_dx_1,mask_dy_1,log_probs_1 = zip(*experiences_1)
@@ -181,10 +178,10 @@ if __name__ == "__main__":
                 #Compute log_probs and values
                 values_,log_probs_ = model_0_gpu.training_forward(states_maps_,states_features_,actions_,mask_action_,mask_dx_,mask_dy_)
 
-                advantages_ = (advantages_ - torch.mean(advantages_,dim=0)) / (torch.std(advantages_,dim=0) + 1e-8)
+                #advantages_ = (advantages_ - torch.mean(advantages_,dim=0)) / (torch.std(advantages_,dim=0) + 1e-8)
 
                 # Losses
-                ratio = torch.exp(log_probs_-p_log_probs_)
+                ratio = torch.exp(log_probs_- p_log_probs_)
                 policy_loss_0 = -torch.mean(torch.min(advantages_ * ratio, advantages_ * torch.clamp(ratio,1-clip_coef,1+clip_coef)))
                 entropy_loss_0 = -torch.mean(torch.exp(log_probs_) * log_probs_)
                 value_loss_0 = torch.mean(torch.pow(values_ - returns_,2))
@@ -204,7 +201,7 @@ if __name__ == "__main__":
                 #Compute log_probs and values
                 values_,log_probs_ = model_1_gpu.training_forward(states_maps_,states_features_,actions_,mask_action_,mask_dx_,mask_dy_)
 
-                advantages_ = (advantages_ - torch.mean(advantages_,dim=0)) / (torch.std(advantages_,dim=0) + 1e-8)
+                #advantages_ = (advantages_ - torch.mean(advantages_,dim=0)) / (torch.std(advantages_,dim=0) + 1e-8)
 
                 # Losses
                 ratio = torch.exp(log_probs_-p_log_probs_)
@@ -223,6 +220,8 @@ if __name__ == "__main__":
 
         model_0.load_state_dict(model_0_gpu.state_dict())
         model_1.load_state_dict(model_1_gpu.state_dict())
+
+        event.set()
 
         try :
             while True :

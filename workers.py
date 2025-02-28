@@ -4,6 +4,8 @@ import torch
 import torch.multiprocessing as mp
 import numpy as np
 import time
+import matplotlib.pyplot as plt
+import scipy
 
 class Luxai_Worker(mp.Process) :
 
@@ -64,8 +66,16 @@ class Luxai_Worker(mp.Process) :
         self.event = event
         self.worker_id = worker_id
 
+        self.patch_distance = []
+        for dist in range(max(self.map_width,self.map_height)*2) :
+            patch = torch.zeros(dist*2+1,dist*2+1,dtype=torch.float32)
+            for i in range(dist+1) :
+                patch[i,dist-i:dist+i+1] = 1
+                patch[-(i+1),dist-i:dist+i+1] = 1
+            self.patch_distance.append(patch)
+
     def random_seed(self,length):
-        #return(20)
+        return(20)
         random.seed()
         min = 10**(length-1)
         max = 9*min + (min-1)
@@ -76,16 +86,16 @@ class Luxai_Worker(mp.Process) :
         with torch.no_grad():
             not_begin_episode = True
 
-            states_features = torch.zeros(2,self.n_steps,self.n_inputs_features,dtype=torch.float)
-            states_maps = torch.zeros(2,self.n_steps,self.n_inputs_maps,self.map_width,self.map_height,dtype=torch.float)
-            actions = torch.zeros(2,self.n_steps,self.n_units,3,dtype=torch.int)
-            values = torch.zeros(2,self.n_steps,self.n_units,dtype=torch.float)
-            rewards = torch.zeros(2,self.n_steps,self.n_units,dtype=torch.float)
-            episode_start = torch.zeros(self.n_steps,dtype=torch.float)
-            mask_actions = torch.zeros(2,self.n_steps,self.n_units,self.n_action,dtype=torch.int8)
-            mask_dxs = torch.zeros(2,self.n_steps,self.n_units,self.sap_range*2+1,dtype=torch.int8)
-            mask_dys = torch.zeros(2,self.n_steps,self.n_units,self.sap_range*2+1,dtype=torch.int8)
-            log_probs = torch.zeros(2,self.n_steps,self.n_units,dtype=torch.float)
+            states_features = torch.zeros(2,self.n_steps,self.n_inputs_features,dtype=torch.float32)
+            states_maps = torch.zeros(2,self.n_steps,self.n_inputs_maps,self.map_width,self.map_height,dtype=torch.float32)
+            actions = torch.zeros(2,self.n_steps,self.n_units,3,dtype=torch.int32)
+            values = torch.zeros(2,self.n_steps,self.n_units,dtype=torch.float32)
+            rewards = torch.zeros(2,self.n_steps,self.n_units,dtype=torch.float32)
+            episode_start = torch.zeros(self.n_steps,dtype=torch.float32)
+            mask_actions = torch.zeros(2,self.n_steps,self.n_units,self.n_action,dtype=torch.float32)
+            mask_dxs = torch.zeros(2,self.n_steps,self.n_units,self.sap_range*2+1,dtype=torch.float32)
+            mask_dys = torch.zeros(2,self.n_steps,self.n_units,self.sap_range*2+1,dtype=torch.float32)
+            log_probs = torch.zeros(2,self.n_steps,self.n_units,dtype=torch.float32)
 
             step_cpt = 0
             episode_cpt = 0
@@ -113,18 +123,20 @@ class Luxai_Worker(mp.Process) :
 
                 state_maps_0, state_features_0 = self.policy_0.obs_to_state(obs['player_0'],self.ep_params)
                 state_maps_1, state_features_1 = self.policy_1.obs_to_state(obs['player_1'],self.ep_params)
+                
+                cumulated_reward = torch.zeros(2,dtype=torch.float32)
+                cumulated_point = torch.zeros(2,dtype=torch.float32)
+
+                energy_0 = torch.zeros(self.n_units,dtype=torch.float32)
+                energy_1 = torch.zeros(self.n_units,dtype=torch.float32)
+
+                distance_explore_0 = torch.zeros(self.n_units,dtype=torch.float32)
+                distance_explore_1 = torch.zeros(self.n_units,dtype=torch.float32)
+
+                units_position_0 = -torch.ones(self.n_units,2,dtype=torch.int32)
+                units_position_1 = -torch.ones(self.n_units,2,dtype=torch.int32)
 
                 previous_obs = obs
-                
-                cumulated_reward = torch.zeros(2,dtype=torch.float)
-                cumulated_point = torch.zeros(2,dtype=torch.float)
-
-                energy_0 = torch.zeros(self.n_units,dtype=torch.float)
-                energy_1 = torch.zeros(self.n_units,dtype=torch.float)
-
-                distance_explore_0 = torch.zeros(self.n_units,dtype=torch.float)
-                distance_explore_1 = torch.zeros(self.n_units,dtype=torch.float)
-
 
                 for ep_step in range(self.len_episode):
 
@@ -136,11 +148,99 @@ class Luxai_Worker(mp.Process) :
                     action = dict(player_0=np.array(action_0, dtype=int), player_1=np.array(action_1, dtype=int))
                     obs, reward, truncated, done, info = self.env.step(action)
 
+                    if ep_step == 0 :
+                        reward_memory = reward
+                        points_0 = obs['player_0']['team_points'][0]
+                        points_1 = obs['player_1']['team_points'][1]
+                        reset_match = 0
+
+                    elif reward['player_0'] > reward_memory['player_0'] :
+                        reward_memory = reward
+                        points_0 = (obs['player_0']['team_points'][0] + self.victory_bonus)
+                        points_1 = obs['player_1']['team_points'][1]
+                        reset_match = 0
+
+                    elif reward['player_1'] > reward_memory['player_1'] :
+                        reward_memory = reward
+                        points_0 = obs['player_0']['team_points'][0]
+                        points_1 = (obs['player_1']['team_points'][1] + self.victory_bonus)
+                        reset_match = 0
+
+                    else :
+                        reset_match += 1
+                        points_0 = (obs['player_0']['team_points'][0] - previous_obs['player_0']['team_points'][0])
+                        points_1 = (obs['player_1']['team_points'][1] - previous_obs['player_1']['team_points'][1])
+
+                    cumulated_point[0] += points_0
+                    cumulated_point[1] += points_1
+
+                    if reset_match == 0 :
+                        continue
+
+                    if reset_match == 1 :
+                        previous_obs = obs
+                    
+                    #Compute next state and new features for the rewards
+                    next_state_maps_0, next_state_features_0 = self.policy_0.obs_to_state(obs['player_0'],self.ep_params,points_0,state_maps_0)
+                    next_state_maps_1, next_state_features_1 = self.policy_1.obs_to_state(obs['player_1'],self.ep_params,points_1,state_maps_1)
+
+                    new_energy_0 = torch.from_numpy(obs['player_0']['units']['energy'][0].astype(np.float32)).view(self.n_units)
+                    new_energy_1 = torch.from_numpy(obs['player_1']['units']['energy'][1].astype(np.float32)).view(self.n_units)
+
+                    units_0 = torch.from_numpy(previous_obs['player_0']['units_mask'][0].astype(np.float32)).view(self.n_units)
+                    units_1 = torch.from_numpy(previous_obs['player_1']['units_mask'][1].astype(np.float32)).view(self.n_units)
+
+                    new_units_position_0 = torch.from_numpy(obs['player_0']['units']['position'][0].astype(np.int32)).view(self.n_units,2)
+                    new_units_position_1 = torch.from_numpy(obs['player_1']['units']['position'][1].astype(np.int32)).view(self.n_units,2)
+
+                    new_distance_explore_0 = torch.zeros(self.n_units,dtype=torch.float32)
+                    new_distance_explore_1 = torch.zeros(self.n_units,dtype=torch.float32)
+
+                    mod_dist_0 = next_state_maps_0[11] + torch.where(next_state_maps_0[9]>0,1,0)*1000
+                    special_reward_0 = torch.ones(self.n_units,dtype=torch.float32)
+                    mod_dist_1 = next_state_maps_1[11] + torch.where(next_state_maps_1[9]>0,1,0)*1000
+                    special_reward_1 = torch.ones(self.n_units,dtype=torch.float32)
+
+                    for unit in torch.argwhere(units_0).view(-1) :
+                        for dist in range(0,2*max(self.map_width,self.map_height)) :
+                            patch_map = torch.zeros(self.map_width,self.map_height)
+                            patch_map[new_units_position_0[unit,0],new_units_position_0[unit,1]] = 1
+                            patch_map = torch.from_numpy(scipy.signal.convolve2d(patch_map,self.patch_distance[dist],mode="same",boundary="fill",fillvalue=0))
+                            dist_tile = mod_dist_0 * patch_map
+                            sum_dist = torch.sum(dist_tile)
+                            if sum_dist > 0 :
+                                new_distance_explore_0[unit] = dist
+                                if sum_dist >= 1000 :
+                                    special_reward_0[unit] = 10
+                                break
+
+                    for unit in torch.argwhere(units_1).view(-1) :
+                        for dist in range(0,2*max(self.map_width,self.map_height)) :
+                            patch_map = torch.zeros(self.map_width,self.map_height)
+                            patch_map[new_units_position_1[unit,0],new_units_position_1[unit,1]] = 1
+                            patch_map = torch.from_numpy(scipy.signal.convolve2d(patch_map,self.patch_distance[dist],mode="same",boundary="fill",fillvalue=0))
+                            dist_tile = mod_dist_1 * patch_map
+                            sum_dist = torch.sum(dist_tile)
+                            if sum_dist > 0 :
+                                new_distance_explore_1[unit] = dist
+                                if sum_dist >= 1000 :
+                                    special_reward_1[unit] = 10
+                                break
+
+                    if reset_match == 1 :
+                        energy_0 = new_energy_0
+                        energy_1 = new_energy_1
+                        distance_explore_0 = new_distance_explore_0
+                        distance_explore_1 = new_distance_explore_1
+                        units_position_0 = new_units_position_0
+                        units_position_1 =  new_units_position_1
+                        continue
+
                     # If the Buffer is full, send collected trajectories to the Queue
                     if step_cpt == self.n_steps :
 
                         # Advantage computation
-                        advantages = torch.zeros(2,self.n_steps,self.n_units,dtype=torch.float)                    
+                        advantages = torch.zeros(2,self.n_steps,self.n_units,dtype=torch.float32)                    
                         last_gae_lam_0 = 0
                         last_gae_lam_1 = 0
 
@@ -149,7 +249,7 @@ class Luxai_Worker(mp.Process) :
                             if step == self.n_steps - 1 :
                                 next_values_0 = value_0
                                 next_values_1 = value_1
-                                non_terminal = 1 - float(ep_step==0)
+                                non_terminal = 1 - float(ep_step==2)
 
                             else:
                                 next_values_0 = values[0,step + 1]
@@ -170,16 +270,16 @@ class Luxai_Worker(mp.Process) :
                         self.shared_queue.put((states_maps,states_features,actions,advantages,returns,mask_actions,mask_dxs,mask_dys,log_probs))
 
                         step_cpt = 0
-                        states_features = torch.zeros(2,self.n_steps,self.n_inputs_features,dtype=torch.float)
-                        states_maps = torch.zeros(2,self.n_steps,self.n_inputs_maps,self.map_width,self.map_height,dtype=torch.float)
-                        actions = torch.zeros(2,self.n_steps,self.n_units,3,dtype=torch.int)
-                        values = torch.zeros(2,self.n_steps,self.n_units,dtype=torch.float)
-                        rewards = torch.zeros(2,self.n_steps,self.n_units,dtype=torch.float)
-                        episode_start = torch.zeros(self.n_steps,dtype=torch.float)
-                        mask_actions = torch.zeros(2,self.n_steps,self.n_units,self.n_action,dtype=torch.int8)
-                        mask_dxs = torch.zeros(2,self.n_steps,self.n_units,self.sap_range*2+1,dtype=torch.int8)
-                        mask_dys = torch.zeros(2,self.n_steps,self.n_units,self.sap_range*2+1,dtype=torch.int8)
-                        log_probs = torch.zeros(2,self.n_steps,self.n_units,dtype=torch.float)
+                        states_features = torch.zeros(2,self.n_steps,self.n_inputs_features,dtype=torch.float32)
+                        states_maps = torch.zeros(2,self.n_steps,self.n_inputs_maps,self.map_width,self.map_height,dtype=torch.float32)
+                        actions = torch.zeros(2,self.n_steps,self.n_units,3,dtype=torch.int32)
+                        values = torch.zeros(2,self.n_steps,self.n_units,dtype=torch.float32)
+                        rewards = torch.zeros(2,self.n_steps,self.n_units,dtype=torch.float32)
+                        episode_start = torch.zeros(self.n_steps,dtype=torch.float32)
+                        mask_actions = torch.zeros(2,self.n_steps,self.n_units,self.n_action,dtype=torch.float32)
+                        mask_dxs = torch.zeros(2,self.n_steps,self.n_units,self.sap_range*2+1,dtype=torch.float32)
+                        mask_dys = torch.zeros(2,self.n_steps,self.n_units,self.sap_range*2+1,dtype=torch.float32)
+                        log_probs = torch.zeros(2,self.n_steps,self.n_units,dtype=torch.float32)
                         
                         global_count += 1
                         episode_cpt += 1
@@ -190,195 +290,119 @@ class Luxai_Worker(mp.Process) :
 
                     # Compute the rewards
 
-                    episode_start[step_cpt] = 0
+                    #Player 0
+                    directions = torch.tensor([[0,0],[0,-1],[1,0],[0,1],[-1,0],[0,0]]).view(6,2)
+                    for unit in range(self.n_units) :
+                        if action_0[unit,0] == 5 :
+                            tx_min = max(new_units_position_0[unit,0]+action_0[unit,1]-1,0)
+                            tx_max = min(new_units_position_0[unit,0]+action_0[unit,1]+1,23)
+                            ty_min = max(new_units_position_0[unit,1]+action_0[unit,2]-1,0)
+                            ty_max = min(new_units_position_0[unit,1]+action_0[unit,2]+1,23)
+                            strike = 0
+                            for enemy in range(self.n_units) :
+                                enemy_position =  units_position_1[enemy] + directions[action_1[enemy,0]]
+                                if (tx_min<=enemy_position[0]<=tx_max) and (ty_min<=enemy_position[1]<=ty_max) :
+                                    bonus = 1
+                                    if torch.sum(torch.abs(enemy_position - new_units_position_1[enemy])) != 0 :
+                                        bonus = 4
+                                    if next_state_maps_1[9,enemy_position[0],enemy_position[1]] == 1 :
+                                        bonus *= 2
+                                    strike += bonus
+                            rewards[0,step_cpt,unit] += strike / 100
 
-                    if ep_step == 0 :
-                        episode_start[step_cpt] = 1
-                        reward_memory = reward
-                        points_0 = obs['player_0']['team_points'][0]
-                        points_1 = obs['player_1']['team_points'][1]
-                        non_reset_matchs = True
+                    units_vision_min_0 = torch.clamp(new_units_position_0 - self.ep_params['unit_sensor_range'],0,23)
+                    units_vision_max_0 = torch.clamp(new_units_position_0 + self.ep_params['unit_sensor_range'],0,23)
 
-                    elif reward['player_0'] > reward_memory['player_0'] :
-                        reward_memory = reward
-                        points_0 = (obs['player_0']['team_points'][0] + self.victory_bonus)
-                        points_1 = obs['player_1']['team_points'][1]
-                        non_reset_matchs = False
+                    dead_units_0 = torch.where(torch.sum(torch.abs(new_units_position_0-units_position_0),dim=1)>1,1,0) * units_0
 
-                    elif reward['player_1'] > reward_memory['player_1'] :
-                        reward_memory = reward
-                        points_0 = obs['player_0']['team_points'][0]
-                        points_1 = (obs['player_1']['team_points'][1] + self.victory_bonus)
-                        non_reset_matchs = False
-
-                    else :
-                        non_reset_matchs = True
-                        points_0 = (obs['player_0']['team_points'][0] - previous_obs['player_0']['team_points'][0])
-                        points_1 = (obs['player_1']['team_points'][1] - previous_obs['player_1']['team_points'][1])
-
-                    next_state_maps_0, next_state_features_0 = self.policy_0.obs_to_state(obs['player_0'],self.ep_params,points_0,state_maps_0)
-                    next_state_maps_1, next_state_features_1 = self.policy_1.obs_to_state(obs['player_1'],self.ep_params,points_1,state_maps_1)
-
-                    cumulated_point[0] += points_0
-                    cumulated_point[1] += points_1
-
-                    new_energy_0 = torch.from_numpy(obs['player_0']['units']['energy'][0].astype(np.int32)).view(self.n_units)
-                    new_energy_1 = torch.from_numpy(obs['player_1']['units']['energy'][1].astype(np.int32)).view(self.n_units)
-
-                    units_0 = torch.from_numpy(obs['player_0']['units_mask'][0].astype(np.int8)).view(self.n_units)
-                    units_1 = torch.from_numpy(obs['player_1']['units_mask'][1].astype(np.int8)).view(self.n_units)
-
-                    units_position_0 = torch.from_numpy(obs['player_0']['units']['position'][0].astype(np.int8)).view(self.n_units,2)
-                    units_position_1 = torch.from_numpy(obs['player_1']['units']['position'][1].astype(np.int8)).view(self.n_units,2)
-
-                    old_units_position_0 = torch.from_numpy(previous_obs['player_0']['units']['position'][0].astype(np.int8)).view(self.n_units,2)
-                    old_units_position_1 = torch.from_numpy(previous_obs['player_1']['units']['position'][1].astype(np.int8)).view(self.n_units,2)
-
-                    new_distance_explore_0 = torch.zeros(self.n_units,dtype=torch.int8)
-                    new_distance_explore_1 = torch.zeros(self.n_units,dtype=torch.int8)
-
-                    mod_dist_0 = next_state_maps_0[11] + torch.where(next_state_maps_0[9]>0,1,0)*1000
-                    special_reward_0 = torch.ones(self.n_units,dtype=torch.int8)
-                    mod_dist_1 = next_state_maps_1[11] + torch.where(next_state_maps_1[9]>0,1,0)*1000
-                    special_reward_1 = torch.ones(self.n_units,dtype=torch.int8)
+                    no_point_reward_0 = torch.ones(self.n_units,dtype=torch.float32)
+                    point_position = -torch.ones(self.n_units,2)
+                    cpt_point = 0
 
                     for unit in torch.argwhere(units_0).view(-1) :
-                        for dist in range(0,23) :
-                            dx_min = max(units_position_0[unit,0]-dist,0)
-                            dx_max = min(units_position_0[unit,0]+dist+1,24)
-                            dy_min = max(units_position_0[unit,1]-dist,0)
-                            dy_max = min(units_position_0[unit,1]+dist+1,24)
-                            dist_tile = mod_dist_0[dx_min:dx_max,dy_min:dy_max]
-                            sum_dist = torch.sum(dist_tile)
-                            if sum_dist > 0 :
-                                new_distance_explore_0[unit] = dist
-                                if sum_dist >= 1000 :
-                                    special_reward_0[unit] = 10
-                                break
+                        rx_min = units_vision_min_0[unit,0]
+                        rx_max = units_vision_max_0[unit,0]+1
+                        ry_min = units_vision_min_0[unit,1]
+                        ry_max = units_vision_max_0[unit,1]+1
+                        new_tiles_0 = next_state_maps_0[0,rx_min:rx_max,ry_min:ry_max]
+                        old_tiles_0 = 1-state_maps_0[3,rx_min:rx_max,ry_min:ry_max]
+                        rewards[0,step_cpt,unit] += torch.sum(new_tiles_0*old_tiles_0) / (self.map_width*self.map_height)
 
+                        point_reward = next_state_maps_0[9,new_units_position_0[unit,0],new_units_position_0[unit,1]] / 100
+                        if (point_reward > 0) and (torch.prod(torch.sum(torch.abs(point_position - new_units_position_0[unit]),dim=1)) != 0) :
+                            point_position[cpt_point] = new_units_position_0[unit]
+                            cpt_point += 1
+                            no_point_reward_0[unit] = 0
+                            rewards[0,step_cpt,unit] += point_reward
+
+                    reward_condition_0 = no_point_reward_0 * (1-dead_units_0) * units_0
+                    rewards[0,step_cpt] -=  reward_condition_0 * special_reward_0 * ((new_distance_explore_0 - distance_explore_0) / (self.map_width*self.map_height))
+                    rewards[0,step_cpt] +=  reward_condition_0 * (new_energy_0-energy_0) / (self.max_unit_energy*50*torch.log(torch.clamp(new_energy_0,min=2)))
+                    rewards[0,step_cpt] -= dead_units_0 /10
+                    
+                    #Player 1
+                    for unit in range(self.n_units) :
+                        if action_1[unit,0] == 5 :
+                            tx_min = max(new_units_position_1[unit,0]+action_1[unit,1]-1,0)
+                            tx_max = min(new_units_position_1[unit,0]+action_1[unit,1]+1,23)
+                            ty_min = max(new_units_position_1[unit,1]+action_1[unit,2]-1,0)
+                            ty_max = min(new_units_position_1[unit,1]+action_1[unit,2]+1,23)
+                            strike = 0
+                            for enemy in range(self.n_units) :
+                                enemy_position =  units_position_0[enemy] + directions[action_0[enemy,0]]
+                                if (tx_min<=enemy_position[0]<=tx_max) and (ty_min<=enemy_position[1]<=ty_max) :
+                                    bonus = 1
+                                    if torch.sum(torch.abs(enemy_position - new_units_position_0[enemy])) != 0 :
+                                        bonus = 4
+                                    if next_state_maps_0[9,enemy_position[0],enemy_position[1]] == 1 :
+                                        bonus *= 2
+                                    strike += bonus
+                            rewards[1,step_cpt,unit] += strike / 100
+
+                    units_vision_min_1 = torch.clamp(new_units_position_1 - self.ep_params['unit_sensor_range'],0,23)
+                    units_vision_max_1 = torch.clamp(new_units_position_1 + self.ep_params['unit_sensor_range'],0,23)
+
+                    dead_units_1 = torch.where(torch.sum(torch.abs(new_units_position_1-units_position_1),dim=1)>1,1,0) * units_1
+                    no_point_reward_1 = torch.ones(self.n_units,dtype=torch.float32)
+                    point_position = -torch.ones(self.n_units,2)
+                    cpt_point = 0
+                    
                     for unit in torch.argwhere(units_1).view(-1) :
-                        for dist in range(0,23) :
-                            dx_min = max(units_position_1[unit,0]-dist,0)
-                            dx_max = min(units_position_1[unit,0]+dist+1,24)
-                            dy_min = max(units_position_1[unit,1]-dist,0)
-                            dy_max = min(units_position_1[unit,1]+dist+1,24)
-                            dist_tile = mod_dist_1[dx_min:dx_max,dy_min:dy_max]
-                            sum_dist = torch.sum(dist_tile)
-                            if sum_dist > 0 :
-                                new_distance_explore_1[unit] = dist
-                                if sum_dist >= 1000 :
-                                    special_reward_1[unit] = 10
-                                break
+                        rx_min = units_vision_min_1[unit,0]
+                        rx_max = units_vision_max_1[unit,0]+1
+                        ry_min = units_vision_min_1[unit,1]
+                        ry_max = units_vision_max_1[unit,1]+1
+                        new_tiles_1 = next_state_maps_1[0,rx_min:rx_max,ry_min:ry_max]
+                        old_tiles_1 = 1-state_maps_1[3,rx_min:rx_max,ry_min:ry_max]
+                        rewards[1,step_cpt,unit] += torch.sum(new_tiles_1*old_tiles_1) / (self.map_width*self.map_height)
 
-                    if non_reset_matchs :
+                        point_reward = next_state_maps_1[9,new_units_position_1[unit,0],new_units_position_1[unit,1]] / 100
 
-                        #Player 0
-                        directions = torch.tensor([[0,0],[0,-1],[1,0],[0,1],[-1,0],[0,0]]).view(6,2)
-                        for unit in range(self.n_units) :
-                            if action_0[unit,0] == 5 :
-                                tx_min = max(units_position_0[unit,0]+action_0[unit,1]-1,0)
-                                tx_max = min(units_position_0[unit,0]+action_0[unit,1]+1,23)
-                                ty_min = max(units_position_0[unit,1]+action_0[unit,2]-1,0)
-                                ty_max = min(units_position_0[unit,1]+action_0[unit,2]+1,23)
-                                strike = 0
-                                for enemy in range(self.n_units) :
-                                    enemy_position =  old_units_position_1[enemy] + directions[action_1[enemy,0]]
-                                    if (tx_min<=enemy_position[0]<=tx_max) and (ty_min<=enemy_position[1]<=ty_max) :
-                                        bonus = 1
-                                        if torch.sum(torch.abs(enemy_position - units_position_1[enemy])) != 0 :
-                                            bonus = 4
-                                        if next_state_maps_1[9,enemy_position[0],enemy_position[1]] == 1 :
-                                            bonus *= 2
-                                        strike += bonus
-                                rewards[0,step_cpt,unit] += strike / 100
+                        if (point_reward > 0) and (torch.prod(torch.sum(torch.abs(point_position - new_units_position_1[unit]),dim=1)) != 0) :
+                            point_position[cpt_point] = new_units_position_1[unit]
+                            cpt_point += 1
+                            no_point_reward_1[unit] = 0
+                            rewards[1,step_cpt,unit] += point_reward
 
-                        units_vision_min_0 = torch.clamp(units_position_0 - self.ep_params['unit_sensor_range'],0,23)
-                        units_vision_max_0 = torch.clamp(units_position_0 + self.ep_params['unit_sensor_range'],0,23)
-
-                        dead_units_0 = torch.where(torch.sum(torch.abs(units_position_0-old_units_position_0),dim=1)>1,1,0) * units_0
-                        no_point_reward_0 = torch.ones(self.n_units,dtype=torch.int8)
-                        point_position = -torch.ones(self.n_units,2)
-                        cpt_point = 0
-
-                        for unit in torch.argwhere(units_0).view(-1) :
-                            rx_min = units_vision_min_0[unit,0]
-                            rx_max = units_vision_max_0[unit,0]+1
-                            ry_min = units_vision_min_0[unit,1]
-                            ry_max = units_vision_max_0[unit,1]+1
-                            new_tiles_0 = next_state_maps_0[0,rx_min:rx_max,ry_min:ry_max]
-                            old_tiles_0 = 1-state_maps_0[3,rx_min:rx_max,ry_min:ry_max]
-                            rewards[0,step_cpt,unit] += torch.sum(new_tiles_0*old_tiles_0) / (self.map_width*self.map_height)
-
-                            point_reward = next_state_maps_0[9,units_position_0[unit,0],units_position_0[unit,1]] / 100
-                            if (point_reward > 0) and (torch.prod(torch.sum(torch.abs(point_position - units_position_0[unit]),dim=1)) != 0) :
-                                point_position[cpt_point] = units_position_0[unit]
-                                cpt_point += 1
-                                no_point_reward_0[unit] = 0
-                                rewards[0,step_cpt,unit] += point_reward
-
-                        reward_condition_0 = no_point_reward_0 * (1-dead_units_0) * units_0
-                        rewards[0,step_cpt] -=  reward_condition_0 * special_reward_0 * ((new_distance_explore_0 - distance_explore_0) / (self.map_width*self.map_height))
-                        rewards[0,step_cpt] +=  reward_condition_0 * (new_energy_0-energy_0) / (self.max_unit_energy*(torch.log(new_energy_0+1)*4+1))
-                        rewards[0,step_cpt] -= dead_units_0 /10
-
-                        #Player 1
-                        for unit in range(self.n_units) :
-                            if action_1[unit,0] == 5 :
-                                tx_min = max(units_position_1[unit,0]+action_1[unit,1]-1,0)
-                                tx_max = min(units_position_1[unit,0]+action_1[unit,1]+1,23)
-                                ty_min = max(units_position_1[unit,1]+action_1[unit,2]-1,0)
-                                ty_max = min(units_position_1[unit,1]+action_1[unit,2]+1,23)
-                                strike = 0
-                                for enemy in range(self.n_units) :
-                                    enemy_position =  old_units_position_0[enemy] + directions[action_0[enemy,0]]
-                                    if (tx_min<=enemy_position[0]<=tx_max) and (ty_min<=enemy_position[1]<=ty_max) :
-                                        bonus = 1
-                                        if torch.sum(torch.abs(enemy_position - units_position_0[enemy])) != 0 :
-                                            bonus = 4
-                                        if next_state_maps_0[9,enemy_position[0],enemy_position[1]] == 1 :
-                                            bonus *= 2
-                                        strike += bonus
-                                rewards[1,step_cpt,unit] += strike / 100
-
-                        units_vision_min_1 = torch.clamp(units_position_1 - self.ep_params['unit_sensor_range'],0,23)
-                        units_vision_max_1 = torch.clamp(units_position_1 + self.ep_params['unit_sensor_range'],0,23)
-
-                        dead_units_1 = torch.where(torch.sum(torch.abs(units_position_1-old_units_position_1),dim=1)>1,1,0) * units_1
-                        no_point_reward_1 = torch.ones(self.n_units,dtype=torch.int8)
-                        point_position = -torch.ones(self.n_units,2)
-                        cpt_point = 0
-                        
-                        for unit in torch.argwhere(units_1).view(-1) :
-                            rx_min = units_vision_min_1[unit,0]
-                            rx_max = units_vision_max_1[unit,0]+1
-                            ry_min = units_vision_min_1[unit,1]
-                            ry_max = units_vision_max_1[unit,1]+1
-                            new_tiles_1 = next_state_maps_1[0,rx_min:rx_max,ry_min:ry_max]
-                            old_tiles_1 = 1-state_maps_1[3,rx_min:rx_max,ry_min:ry_max]
-                            rewards[1,step_cpt,unit] += torch.sum(new_tiles_1*old_tiles_1) / (self.map_width*self.map_height)
-
-                            point_reward = next_state_maps_1[9,units_position_1[unit,0],units_position_1[unit,1]] / 100
-
-                            if (point_reward > 0) and (torch.prod(torch.sum(torch.abs(point_position - units_position_1[unit]),dim=1)) != 0) :
-                                point_position[cpt_point] = units_position_1[unit]
-                                cpt_point += 1
-                                no_point_reward_1[unit] = 0
-                                rewards[1,step_cpt,unit] += point_reward
-
-                        reward_condition_1 = no_point_reward_1 * (1-dead_units_1) * units_1
-                        rewards[1,step_cpt] -= reward_condition_1 * special_reward_1 * ((new_distance_explore_1 - distance_explore_1) / (self.map_width*self.map_height))
-                        rewards[1,step_cpt] += reward_condition_1 * (new_energy_1-energy_1) / (self.max_unit_energy*(torch.log(new_energy_1+1)*4+1))
-                        rewards[1,step_cpt] -= dead_units_1 /10
+                    reward_condition_1 = no_point_reward_1 * (1-dead_units_1) * units_1
+                    rewards[1,step_cpt] -= reward_condition_1 * special_reward_1 * ((new_distance_explore_1 - distance_explore_1) / (self.map_width*self.map_height))
+                    rewards[1,step_cpt] += reward_condition_1 * (new_energy_1-energy_1) / (self.max_unit_energy*50*torch.log(torch.clamp(new_energy_1,min=2)))
+                    rewards[1,step_cpt] -= dead_units_1 /10
                     
                     energy_0 = new_energy_0
                     energy_1 = new_energy_1
                     distance_explore_0 = new_distance_explore_0
                     distance_explore_1 = new_distance_explore_1
+                    units_position_0 = new_units_position_0
+                    units_position_1 =  new_units_position_1
                     
                     cumulated_reward[0] += torch.mean(rewards[0,step_cpt])
                     cumulated_reward[1] += torch.mean(rewards[1,step_cpt])
 
                     #Update the trajectories
+                    if reset_match == 2 :
+                        episode_start[step_cpt] = 1
+                    
                     states_maps[0,step_cpt] = state_maps_0
                     states_features[0,step_cpt] = state_features_0
                     states_maps[1,step_cpt] = state_maps_1
