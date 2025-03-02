@@ -98,7 +98,6 @@ class Luxai_Worker(mp.Process) :
             log_probs = torch.zeros(2,self.n_steps,self.n_units,dtype=torch.float32)
 
             step_cpt = 0
-            episode_cpt = 0
             global_count = 0
 
             while global_count < self.n_epochs*self.n_episode :
@@ -266,8 +265,7 @@ class Luxai_Worker(mp.Process) :
                             advantages[1,step] = last_gae_lam_1
 
                         returns = advantages + values
-
-                        self.shared_queue.put((states_maps,states_features,actions,advantages,returns,mask_actions,mask_dxs,mask_dys,log_probs))
+                        self.shared_queue.put((states_maps,states_features,actions,advantages,returns,log_probs,mask_actions,mask_dxs,mask_dys))
 
                         step_cpt = 0
                         states_features = torch.zeros(2,self.n_steps,self.n_inputs_features,dtype=torch.float32)
@@ -282,11 +280,6 @@ class Luxai_Worker(mp.Process) :
                         log_probs = torch.zeros(2,self.n_steps,self.n_units,dtype=torch.float32)
                         
                         global_count += 1
-                        episode_cpt += 1
-                        if episode_cpt == self.n_episode and global_count < self.n_epochs*self.n_episode :
-                            self.event.wait()
-                            self.event.clear()
-                            episode_cpt = 0
 
                     # Compute the rewards
 

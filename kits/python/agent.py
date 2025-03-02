@@ -29,8 +29,8 @@ class Agent():
         self.policy_0 = Luxai_Agent(self.player)
         self.policy_1 = Luxai_Agent(self.player)
 
-        self.policy_0.load_state_dict(torch.load("../../policy/PPO_unit_reward/policy_0_epoch_0.pth", weights_only=True))
-        self.policy_1.load_state_dict(torch.load("../../policy/PPO_unit_reward/policy_1_epoch_0.pth", weights_only=True))
+        self.policy_0.load_state_dict(torch.load("../../policy/A2C_unit_reward/policy_0_epoch_0.pth", weights_only=True))
+        self.policy_1.load_state_dict(torch.load("../../policy/A2C_unit_reward/policy_1_epoch_0.pth", weights_only=True))
 
     def act(self, step: int, obs, remainingOverageTime: int = 60):
         good_obs = to_numpy(flax.serialization.to_state_dict(obs))

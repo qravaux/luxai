@@ -154,16 +154,16 @@ class Luxai_Agent(nn.Module) :
         
         #Compute memory map
         state_maps[3] = state_maps[0] + (1-state_maps[0]) * torch.rot90(state_maps[0],2).T #Because the map is symetric
-        state_maps[4] = state_maps[1] * state_maps[0] + (1-state_maps[0]) * torch.rot90(state_maps[1],2).T
-        state_maps[5] = state_maps[2] * state_maps[0] + (1-state_maps[0]) * torch.rot90(state_maps[2],2).T
+        state_maps[4] = state_maps[1] + (1-state_maps[0]) * torch.rot90(state_maps[1],2).T
+        state_maps[5] = state_maps[2] + (1-state_maps[0]) * torch.rot90(state_maps[2],2).T
 
-        state_maps[4] = state_maps[3] * state_maps[4] + (1-state_maps[3]) * map_memory[4]
-        state_maps[5] = state_maps[3] * state_maps[5] + (1-state_maps[3]) * map_memory[5]
-        state_maps[3] = state_maps[3] + (1-state_maps[3]) * map_memory[3] #Add memory
+        state_maps[4] = state_maps[4] + (1-state_maps[3]) * map_memory[4]
+        state_maps[5] = state_maps[5] + (1-state_maps[3]) * map_memory[5]
+        state_maps[3] = map_memory[3] + (1-map_memory[3]) * state_maps[3] #Add memory
     
         modified_sensor_mask = torch.clamp(torch.from_numpy(scipy.signal.convolve2d(state_maps[7],torch.ones(2*ep_params['unit_sensor_range']+1,2*ep_params['unit_sensor_range']+1),mode="same",boundary="fill",fillvalue=0)),max=1)
         state_maps[10] = modified_sensor_mask + (1-modified_sensor_mask) * torch.rot90(modified_sensor_mask,2).T
-        state_maps[10] = state_maps[10] + (1-state_maps[10]) * map_memory[10]
+        state_maps[10] = map_memory[10] + (1-map_memory[10]) * state_maps[10]
         
         state_maps[6] = map_memory[6]
         for (i,j) in obs['relic_nodes'] :
@@ -186,11 +186,12 @@ class Luxai_Agent(nn.Module) :
 
         question = state_maps[8] * state_maps[7]
         old_prob = map_memory[9] * state_maps[8]
-        new_prob = question*(points/torch.sum(question)) + (1-question)*old_prob
+        points_prob = points/torch.sum(question)
+        new_prob = question*points_prob + (1-question)*old_prob
         state_maps[9] = torch.where(new_prob > old_prob, new_prob, old_prob)
         state_maps[9] = torch.where(new_prob==0,new_prob,state_maps[9])
         rotated_map = torch.rot90(state_maps[9],2).T
-        state_maps[9] = torch.where(state_maps[9] > rotated_map, state_maps[9], rotated_map)
+        state_maps[9] = torch.where(state_maps[9] >= rotated_map, state_maps[9], rotated_map)
 
         #Units
         list_state_features.append(torch.from_numpy(obs['units']['position'].astype(np.float32)).flatten()/24) #position
@@ -211,14 +212,15 @@ class Luxai_Agent(nn.Module) :
 
         state_features = torch.cat(list_state_features)
 
-        if show :     
-            plt.imshow(state_maps[0].T)
+        if show :    
+            plt.imshow(state_maps[6].T)
             plt.show()
-            plt.imshow(modified_sensor_mask.T)
+            plt.imshow(torch.clamp(torch.from_numpy(scipy.signal.convolve2d(map_relic,torch.ones(5,5),mode="same",boundary="fill",fillvalue=0)),max=1).T)
             plt.show()
-            for i in range(1,12) :
-                plt.imshow(state_maps[i].T)
-                plt.show()
+            plt.imshow(state_maps[8].T)
+            plt.show()
+            plt.imshow(state_maps[9].T)
+            plt.show()
 
         return state_maps , state_features
 
