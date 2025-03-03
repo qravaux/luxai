@@ -29,27 +29,40 @@ state_maps_0, state_features_0 = policy_0.obs_to_state(obs['player_0'],ep_params
 state_maps_1, state_features_1 = policy_1.obs_to_state(obs['player_1'],ep_params)
 
 for step in range(505) :
-    show = (step%2)==0
+    show = step%100== 0
 
-    if show : 
-
+    if step%10==0 : 
         renderer.render(env.state,env.env_params)
 
     if step == 0:
+        reward_memory = {'player_0':0,'player_1':0}
         points_0 = obs['player_0']['team_points'][0]
         points_1 = obs['player_1']['team_points'][1]
+        previous_obs = obs
+
+    elif reward['player_0'] > reward_memory['player_0'] :
+        reward_memory = reward
+        points_0 = (obs['player_0']['team_points'][0])
+        points_1 = obs['player_1']['team_points'][1]
+        previous_obs = obs
+
+    elif reward['player_1'] > reward_memory['player_1'] :
+        reward_memory = reward
+        points_0 = obs['player_0']['team_points'][0]
+        points_1 = (obs['player_1']['team_points'][1])
         previous_obs = obs
 
     else :
         points_0 = (obs['player_0']['team_points'][0] - previous_obs['player_0']['team_points'][0])
         points_1 = (obs['player_1']['team_points'][1] - previous_obs['player_1']['team_points'][1])
         previous_obs = obs
+
     print(points_0,points_1)
-    #print(obs['player_0']['relic_nodes_mask'])
-    state_maps_0 ,state_features_0 = policy_0.obs_to_state(obs['player_0'],ep_params,points_0,state_maps_0,show=False)
+
+    state_maps_0 ,state_features_0 = policy_0.obs_to_state(obs['player_0'],ep_params,points_0,state_maps_0,show=show)
     action_0, value, mask_action, mask_dx, mask_dy, log_prob = policy_0(state_maps_0 ,state_features_0,obs['player_0'],ep_params)
 
-    state_maps_1 ,state_features_1 = policy_1.obs_to_state(obs['player_1'],ep_params,points_1,state_maps_1,show=False)
+    state_maps_1 ,state_features_1 = policy_1.obs_to_state(obs['player_1'],ep_params,points_1,state_maps_1,show=show)
     action_1, value, mask_action, mask_dx, mask_dy, log_prob = policy_1(state_maps_1 ,state_features_1,obs['player_1'],ep_params)
 
     action = dict(player_0=np.array(action_0, dtype=int), player_1=np.array(action_1, dtype=int))

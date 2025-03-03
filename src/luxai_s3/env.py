@@ -232,7 +232,7 @@ class LuxAIS3Env(environment.Environment):
         state = state.replace(
             units_mask=(state.units.energy[..., 0] >= 0) & state.units_mask
         )
-        
+
         """spawn relic nodes based on schedule"""
         relic_nodes_mask = (state.steps >= state.relic_spawn_schedule) & (state.relic_spawn_schedule != -1)
         state = state.replace(relic_nodes_mask=relic_nodes_mask)

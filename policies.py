@@ -24,7 +24,7 @@ class Luxai_Agent(nn.Module) :
         self.n_action = 6
         self.n_units = 16
         self.max_sap_range = 8
-        self.n_input_maps = 12
+        self.n_inputs_maps = 10
         self.max_relic_nodes = 6
         self.map_height = 24
         self.map_width = 24
@@ -41,7 +41,7 @@ class Luxai_Agent(nn.Module) :
 
         self.max_pooling = nn.MaxPool2d(kernel_size=2)
 
-        self.cnn_inputs_actor = nn.Conv2d(self.n_input_maps,
+        self.cnn_inputs_actor = nn.Conv2d(self.n_inputs_maps,
                                     self.cnn_channels[0],
                                     kernel_size=self.cnn_kernels[0],
                                     padding=self.cnn_kernels[0]-1,
@@ -55,7 +55,7 @@ class Luxai_Agent(nn.Module) :
                                     stride=self.cnn_strides[i+1],
                                     dtype=torch.float32) for i in range(len(self.cnn_channels)-1)])
         
-        self.cnn_inputs_critic = nn.Conv2d(self.n_input_maps,
+        self.cnn_inputs_critic = nn.Conv2d(self.n_inputs_maps,
                                     self.cnn_channels[0],
                                     kernel_size=self.cnn_kernels[0],
                                     padding=self.cnn_kernels[0]-1,
@@ -69,7 +69,7 @@ class Luxai_Agent(nn.Module) :
                                     stride=self.cnn_strides[i+1],
                                     dtype=torch.float32) for i in range(len(self.cnn_channels)-1)])
         
-        state_maps = torch.zeros(self.n_input_maps,self.map_width,self.map_height)
+        state_maps = torch.zeros(self.n_inputs_maps,self.map_width,self.map_height)
         state_features = torch.zeros(8*self.n_units + self.max_relic_nodes*3 + 6 + 4)
         
         with torch.no_grad() :
@@ -78,16 +78,16 @@ class Luxai_Agent(nn.Module) :
             for layer in self.cnn_hidden_actor :
                 x = layer(x)
                 x = self.max_pooling(x)
-            self.n_input_features = x.flatten(start_dim=0).size(0) + state_features.size(0)
+            self.n_inputs_features = x.flatten(start_dim=0).size(0) + state_features.size(0)
         
-        self.inputs_actor = nn.Linear(self.n_input_features,self.actor_size[0],dtype=torch.float32)
+        self.inputs_actor = nn.Linear(self.n_inputs_features,self.actor_size[0],dtype=torch.float32)
         self.hidden_actor = nn.ModuleList([nn.Linear(self.actor_size[i],self.actor_size[i+1],dtype=torch.float32) for i in range(len(self.actor_size)-1)])
 
         self.actor_action_layer = nn.Linear(self.actor_size[-1],self.n_action*self.n_units,dtype=torch.float32)
         self.actor_dx_layer = nn.Linear(self.actor_size[-1],(self.max_sap_range*2+1)*self.n_units,dtype=torch.float32)
         self.actor_dy_layer = nn.Linear(self.actor_size[-1],(self.max_sap_range*2+1)*self.n_units,dtype=torch.float32)
 
-        self.inputs_critic = nn.Linear(self.n_input_features,self.critic_size[0],dtype=torch.float32)
+        self.inputs_critic = nn.Linear(self.n_inputs_features,self.critic_size[0],dtype=torch.float32)
         self.hidden_critic = nn.ModuleList([nn.Linear(self.critic_size[i],self.critic_size[i+1],dtype=torch.float32) for i in range(len(self.critic_size)-1)])
         self.outputs_critic = nn.Linear(self.critic_size[-1],self.n_units,dtype=torch.float32)
 
@@ -132,90 +132,97 @@ class Luxai_Agent(nn.Module) :
         nn.init.orthogonal_(self.outputs_critic.weight,gain=1)
         nn.init.zeros_(self.outputs_critic.bias)
 
-    def obs_to_state(self,obs:dict,ep_params:dict,points=0,map_memory=None,show=False) -> torch.Tensor:
+    def obs_to_state(self,obs:dict,ep_params,points=0,map_memory=None,show=False) -> torch.Tensor:
 
         if map_memory == None :
-            map_memory = torch.zeros(12,24,24,dtype=torch.float32)
+            map_memory = torch.zeros(self.n_inputs_maps,self.map_width,self.map_height,dtype=torch.float32)
             map_memory[5] = -1
             map_memory[4] = -1
             map_memory[9] = -1
 
         list_state_features = []
 
-        state_maps = torch.zeros(12,24,24,dtype=torch.float32)
+        state_maps = torch.zeros(self.n_inputs_maps,self.map_width,self.map_height,dtype=torch.float32)
 
-        state_maps[0] = torch.from_numpy(obs['sensor_mask'].astype(np.float32)) #sensor_mask
-        state_maps[1] = torch.from_numpy(obs['map_features']['energy'].astype(np.float32))/20 #map_energy
-        state_maps[2] = torch.from_numpy(obs['map_features']['tile_type'].astype(np.float32))/2 #map_tile_type
+        state_maps[0] = torch.tensor(obs.sensor_mask,dtype=torch.float32) #sensor_mask
+        state_maps[1] = torch.tensor(obs.map_features.energy,dtype=torch.float32)/20 #map_energy
+        state_maps[2] = torch.tensor(obs.map_features.tile_type,dtype=torch.float32) #map_tile_type
 
-        for (i,j) in obs['units']['position'][self.player_id] :
+        state_maps[6] = map_memory[6]
+        for (i,j) in torch.tensor(obs.relic_nodes) :
+            if i != -1 :
+                state_maps[6,i,j] = 1
+                state_maps[6,23-j,23-i] = 1
+
+        for (i,j) in torch.tensor(obs.units.position[self.player_id]) :
             if i != -1 :
                 state_maps[7,i,j] = 1
-        
+
+        step_match = int(obs.match_steps)
+        n_match = torch.sum(torch.tensor(obs.team_wins))
+        n_relic = torch.sum(state_maps[6])
+
         #Compute memory map
         state_maps[3] = state_maps[0] + (1-state_maps[0]) * torch.rot90(state_maps[0],2).T #Because the map is symetric
         state_maps[4] = state_maps[1] + (1-state_maps[0]) * torch.rot90(state_maps[1],2).T
         state_maps[5] = state_maps[2] + (1-state_maps[0]) * torch.rot90(state_maps[2],2).T
 
-        state_maps[4] = state_maps[4] + (1-state_maps[3]) * map_memory[4]
+        state_maps[4] = state_maps[4] + (1-state_maps[3]) * map_memory[4] #Add memory
         state_maps[5] = state_maps[5] + (1-state_maps[3]) * map_memory[5]
-        state_maps[3] = map_memory[3] + (1-map_memory[3]) * state_maps[3] #Add memory
-    
-        modified_sensor_mask = torch.clamp(torch.from_numpy(scipy.signal.convolve2d(state_maps[7],torch.ones(2*ep_params['unit_sensor_range']+1,2*ep_params['unit_sensor_range']+1),mode="same",boundary="fill",fillvalue=0)),max=1)
-        state_maps[10] = modified_sensor_mask + (1-modified_sensor_mask) * torch.rot90(modified_sensor_mask,2).T
-        state_maps[10] = map_memory[10] + (1-map_memory[10]) * state_maps[10]
-        
-        state_maps[6] = map_memory[6]
-        for (i,j) in obs['relic_nodes'] :
-            if i != -1 :
-                state_maps[6,i,j] = 1
-                state_maps[6,23-j,23-i] = 1
 
-        if torch.sum(state_maps[6]) == self.max_relic_nodes or torch.sum(state_maps[3]) == self.map_width*self.map_height :
+        if ((n_match >= 3) and (step_match>0)) or (n_relic == (n_match+1)*2) or (n_relic==self.max_relic_nodes) :
+            state_maps[3] = map_memory[3] + (1-map_memory[3]) * state_maps[3]
+        
+        else :
+            map_memory[9] = torch.where(map_memory[9]==0,-1,map_memory[9])
+
+        if (n_relic == self.max_relic_nodes) or (n_relic == (n_match+1)*2) :
             map_relic = state_maps[6] 
-            map_relic_modified = state_maps[6]
         else :
             map_relic = state_maps[6] + (1-state_maps[3])
-            map_relic_modified = state_maps[6] + (1-state_maps[10])
 
         state_maps[8] = torch.clamp(torch.from_numpy(scipy.signal.convolve2d(map_relic,torch.ones(5,5),mode="same",boundary="fill",fillvalue=0)),max=1)
         state_maps[8] = state_maps[8] * torch.where(map_memory[9]!=0,1,0)
 
-        state_maps[11] = torch.clamp(torch.from_numpy(scipy.signal.convolve2d(map_relic_modified,torch.ones(5,5),mode="same",boundary="fill",fillvalue=0)),max=1)
-        state_maps[11] = state_maps[11] * torch.where(map_memory[9]!=0,1,0) * (1-state_maps[7])
-
         question = state_maps[8] * state_maps[7]
+
         old_prob = map_memory[9] * state_maps[8]
-        points_prob = points/torch.sum(question)
-        new_prob = question*points_prob + (1-question)*old_prob
+
+        sure = torch.sum(torch.where(map_memory[9]*question==1,1,0))
+        sum_question = torch.sum(question)
+        if (points == 0) or (sum_question-sure == 0) :
+            points_prob = 0
+        else :
+            points_prob = (points-sure)/(sum_question-sure)
+        new_prob = question*points_prob + (1-question) * (-1)
+        
         state_maps[9] = torch.where(new_prob > old_prob, new_prob, old_prob)
-        state_maps[9] = torch.where(new_prob==0,new_prob,state_maps[9])
+        if ((n_match >= 3) and (step_match>0)) or (n_relic == (n_match+1)*2) or (n_relic==self.max_relic_nodes) :
+            state_maps[9] = torch.where(old_prob==0,0,state_maps[9])
         rotated_map = torch.rot90(state_maps[9],2).T
         state_maps[9] = torch.where(state_maps[9] >= rotated_map, state_maps[9], rotated_map)
 
         #Units
-        list_state_features.append(torch.from_numpy(obs['units']['position'].astype(np.float32)).flatten()/24) #position
-        list_state_features.append(torch.from_numpy(obs['units']['energy'].astype(np.float32)).flatten()/400) #energy
-        list_state_features.append(torch.from_numpy(obs['units_mask'].astype(np.float32)).flatten()) #unit_mask
+        list_state_features.append(torch.tensor(obs.units.position,dtype=torch.float32).flatten()/24) #position
+        list_state_features.append(torch.tensor(obs.units.energy,dtype=torch.float32).flatten()/400) #energy
+        list_state_features.append(torch.tensor(obs.units_mask,dtype=torch.float32).flatten()) #unit_mask
 
-        list_state_features.append(torch.from_numpy(obs['relic_nodes'].astype(np.float32)).flatten()/24) #relic_nodes
-        list_state_features.append(torch.from_numpy(obs['relic_nodes_mask'].astype(np.float32)).flatten()) #relic_nodes_mask
+        list_state_features.append(torch.tensor(obs.relic_nodes,dtype=torch.float32).flatten()/24) #relic_nodes
+        list_state_features.append(torch.tensor(obs.relic_nodes_mask,dtype=torch.float32).flatten()) #relic_nodes_mask
 
         #Game
-        list_state_features.append(torch.from_numpy(obs['team_points'].astype(np.float32)).flatten()/3000) #team_points
-        list_state_features.append(torch.from_numpy(obs['team_wins'].astype(np.float32)).flatten()/5) #team_wins
+        list_state_features.append(torch.tensor(obs.team_points,dtype=torch.float32).flatten()/3000) #team_points
+        list_state_features.append(torch.tensor(obs.team_wins,dtype=torch.float32).flatten()/5) #team_wins
 
-        list_state_features.append(torch.from_numpy(obs['steps'].astype(np.float32)).flatten()/505) #steps
-        list_state_features.append(torch.from_numpy(obs['match_steps'].astype(np.float32)).flatten()/101) #match_steps
+        list_state_features.append(torch.tensor(obs.steps,dtype=torch.float32).flatten()/505) #steps
+        list_state_features.append(torch.tensor(obs.match_steps,dtype=torch.float32).flatten()/101) #match_steps
 
-        list_state_features.append(torch.FloatTensor([ep_params['unit_move_cost'],ep_params['unit_sap_cost'],ep_params['unit_sap_range'],ep_params['unit_sensor_range']])) #Static information about the episode
+        list_state_features.append(torch.FloatTensor([ep_params.unit_move_cost,ep_params.unit_sap_cost,ep_params.unit_sap_range,ep_params.unit_sensor_range])) #Static information about the episode
 
         state_features = torch.cat(list_state_features)
 
         if show :    
             plt.imshow(state_maps[6].T)
-            plt.show()
-            plt.imshow(torch.clamp(torch.from_numpy(scipy.signal.convolve2d(map_relic,torch.ones(5,5),mode="same",boundary="fill",fillvalue=0)),max=1).T)
             plt.show()
             plt.imshow(state_maps[8].T)
             plt.show()
@@ -270,7 +277,7 @@ class Luxai_Agent(nn.Module) :
 
         return value,log_prob
 
-    def forward(self,x_maps,x_features,obs,ep_params) :
+    def forward(self,x_maps,x_features,obs,ep_params):
 
         with torch.no_grad() :
             
@@ -289,12 +296,12 @@ class Luxai_Agent(nn.Module) :
 
             #Gather information for masking
             state = {}
-            state['energy'] = torch.from_numpy(obs['units']['energy'][self.player_id].astype(np.float32)).view(self.n_units)
-            state['units'] = torch.from_numpy(obs['units']['position'][self.player_id].astype(np.float32)).view(self.n_units,2)
-            state['map'] = torch.from_numpy(obs['map_features']['tile_type'].astype(np.float32)).view(24,24)
+            state['energy'] = torch.tensor(obs.units.energy[self.player_id], dtype=torch.float32).view(self.n_units)
+            state['units'] = torch.tensor(obs.units.position[self.player_id], dtype=torch.float32).view(self.n_units,2)
+            state['map'] = torch.tensor(obs.map_features.tile_type, dtype=torch.float32).view(24,24)
             
-            energy_mask = state['energy'] < ep_params['unit_move_cost']
-            sap_mask = state['energy'] < ep_params['unit_sap_cost']
+            energy_mask = state['energy'] < ep_params.unit_move_cost
+            sap_mask = state['energy'] < ep_params.unit_sap_cost
 
             #Compute action masks and output logprobs
             mask_action = torch.zeros(self.n_units,self.n_action,dtype=torch.float32)
@@ -326,29 +333,30 @@ class Luxai_Agent(nn.Module) :
             mask_action[:,0] = 0
 
             actor_action = self.final_activation(self.actor_action_layer(x)).view(self.n_units,self.n_action) - mask_action*100
+
             actor_action = F.log_softmax(actor_action,dim=-1)
             action_choice = Categorical(logits=actor_action).sample()
 
             sap_mask =  sap_mask | (action_choice !=5)
 
-            mask_dx[:,:self.max_sap_range-ep_params['unit_sap_range']] += 1
-            mask_dx[:,self.max_sap_range+ep_params['unit_sap_range']+1:] += 1
-            mask_dy[:,:self.max_sap_range-ep_params['unit_sap_range']] += 1
-            mask_dy[:,self.max_sap_range+ep_params['unit_sap_range']+1:] += 1
+            mask_dx[:,:self.max_sap_range-ep_params.unit_sap_range] += 1
+            mask_dx[:,self.max_sap_range+ep_params.unit_sap_range+1:] += 1
+            mask_dy[:,:self.max_sap_range-ep_params.unit_sap_range] += 1
+            mask_dy[:,self.max_sap_range+ep_params.unit_sap_range+1:] += 1
 
             mask_dx[torch.argwhere(sap_mask).view(-1)] += 1
             mask_dy[torch.argwhere(sap_mask).view(-1)] += 1
 
-            directions = torch.arange(-ep_params['unit_sap_range'],ep_params['unit_sap_range']+1).view(2*ep_params['unit_sap_range']+1)
-            expand_postion = state['units'].unsqueeze(1).expand(self.n_units,2*ep_params['unit_sap_range']+1,2).clone()
-            target_dx = expand_postion[:,:,0].view(self.n_units,2*ep_params['unit_sap_range']+1) + directions
-            target_dy = expand_postion[:,:,1].view(self.n_units,2*ep_params['unit_sap_range']+1) + directions
+            directions = torch.arange(-ep_params.unit_sap_range,ep_params.unit_sap_range+1).view(2*ep_params.unit_sap_range+1)
+            expand_postion = state['units'].unsqueeze(1).expand(self.n_units,2*ep_params.unit_sap_range+1,2).clone()
+            target_dx = expand_postion[:,:,0].view(self.n_units,2*ep_params.unit_sap_range+1) + directions
+            target_dy = expand_postion[:,:,1].view(self.n_units,2*ep_params.unit_sap_range+1) + directions
 
             forbidden_dx = ((target_dx<0) | (target_dx>23)).float()
             forbidden_dy = ((target_dy<0) | (target_dy>23)).float()
 
-            mask_dx[:,self.max_sap_range-ep_params['unit_sap_range']:self.max_sap_range+ep_params['unit_sap_range']+1] += forbidden_dx
-            mask_dy[:,self.max_sap_range-ep_params['unit_sap_range']:self.max_sap_range+ep_params['unit_sap_range']+1] += forbidden_dy
+            mask_dx[:,self.max_sap_range-ep_params.unit_sap_range:self.max_sap_range+ep_params.unit_sap_range+1] += forbidden_dx
+            mask_dy[:,self.max_sap_range-ep_params.unit_sap_range:self.max_sap_range+ep_params.unit_sap_range+1] += forbidden_dy
 
             mask_dx[:,self.max_sap_range] = 0
             mask_dy[:,self.max_sap_range] = 0

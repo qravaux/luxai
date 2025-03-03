@@ -18,7 +18,7 @@ class PrioritizedReplayBuffer:
         self.len_cpt = 0
         self.priorities = torch.zeros(capacity, dtype=torch.float32).to(device)
         self.priorities[0] = 1
-        self.n_inputs_maps = 12
+        self.n_inputs_maps = 10
         self.n_units = 16
         self.n_action = 6
         self.sap_range = 8
@@ -36,6 +36,7 @@ class PrioritizedReplayBuffer:
         self.mask_dxs_buffer = torch.zeros(self.capacity,self.n_units,self.sap_range*2+1,dtype=torch.float32).to(device)
         self.mask_dys_buffer = torch.zeros(self.capacity,self.n_units,self.sap_range*2+1,dtype=torch.float32).to(device)
 
+        self.priorities.requires_grad = False
         self.advantages_buffer.requires_grad = False
         self.returns_buffer.requires_grad = False
         self.log_probs_buffer.requires_grad = False
@@ -101,7 +102,7 @@ class PrioritizedReplayBuffer:
         total = self.len_cpt
         weights = (total * probs[indices]) ** (-beta)
         weights /= weights.max()
-        weights = torch.tensor(weights, dtype=torch.float32).to(device)
+        weights = weights.detach().to(device)
 
         states_maps = self.states_maps_buffer[indices]
         states_features = self.states_features_buffer[indices]
@@ -123,8 +124,8 @@ class PrioritizedReplayBuffer:
 if __name__ == "__main__":
 
     print('Initialise training environment...\n')
-    lr0 = 1e-6
-    lr1 = 1e-7
+    lr0 = 1e-8
+    lr1 = 1e-9
     max_norm0 = 0.5
     max_norm1 = 0.5
     entropy_coef0 = 0.001
@@ -134,12 +135,12 @@ if __name__ == "__main__":
     eps = 1e-8
     betas = (0.9,0.999)
 
-    replay_buffer_capacity = 10000
+    replay_buffer_capacity = 50000
     batch_size = 100
     vf_coef = 0.5
     gamma = 0.995
     gae_lambda = 0.99
-    save_rate = 20
+    save_rate = 1000
 
     n_epochs = int(1e6)
     n_batch = 10
@@ -152,6 +153,7 @@ if __name__ == "__main__":
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     env = LuxAIS3GymEnv(numpy_output=True)
+
     n_units = env.env_params.max_units
     sap_range = env.env_params.unit_sap_range
     match_step = env.env_params.max_steps_in_match + 1
@@ -254,7 +256,7 @@ if __name__ == "__main__":
 
             #Compute log_probs and values
             values_,log_probs_ = model_0_gpu.training_forward(states_maps_,states_features_,actions_,mask_actions_,mask_dxs_,mask_dys_)
-            #advantages_ = (advantages_ - torch.mean(advantages_,dim=0)) / (torch.std(advantages_,dim=0) + 1e-8)
+            advantages_ = (advantages_ - torch.mean(advantages_,dim=0)) / (torch.std(advantages_,dim=0) + 1e-8)
         
             # Losses
             entropy_loss_0 = -torch.mean(weights_*torch.sum(torch.exp(log_probs_) * log_probs_,dim=-1))
@@ -275,7 +277,7 @@ if __name__ == "__main__":
 
             #Compute log_probs and values
             values_,log_probs_ = model_1_gpu.training_forward(states_maps_,states_features_,actions_,mask_actions_,mask_dxs_,mask_dys_)
-            #advantages_ = (advantages_ - torch.mean(advantages_,dim=0)) / (torch.std(advantages_,dim=0) + 1e-8)
+            advantages_ = (advantages_ - torch.mean(advantages_,dim=0)) / (torch.std(advantages_,dim=0) + 1e-8)
 
             # Losses
             entropy_loss_1 = -torch.mean(weights_*torch.sum(torch.exp(log_probs_) * log_probs_,dim=-1))
