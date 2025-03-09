@@ -16,7 +16,7 @@ if __name__ == "__main__":
     num_envs = 512
     num_workers = 2
 
-    lr = 1e-8
+    lr = 1e-10
     lr_decay = 0.98
     max_norm = 0.5
     entropy_coef = 0.001
@@ -36,7 +36,7 @@ if __name__ == "__main__":
     n_steps = 20
     n_batch = ((num_envs*n_steps*2) // batch_size)*10
 
-    file_name = 'jax_1e-8_A2C'
+    file_name = 'jax_1e-10_A2C'
     save_dir = f"policy/{file_name}"
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

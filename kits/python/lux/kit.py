@@ -1,4 +1,5 @@
 import numpy as np
+import jax.numpy as jnp
 
 def to_json(obj):
     if isinstance(obj, np.ndarray):
@@ -35,3 +36,13 @@ def to_numpy(x):
         return x
     else:
         return np.array(x)
+    
+def to_jax(x):
+    if isinstance(x, dict):
+        return {k: to_numpy(v) for k, v in x.items()}
+    elif isinstance(x, list):
+        return jnp.array(x)
+    elif isinstance(x, jnp.ndarray):
+        return x
+    else:
+        return jnp.array(x)

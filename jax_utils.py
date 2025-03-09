@@ -376,13 +376,13 @@ def compute_reward(obs,previous_obs,action,new_distance,distance,target,player) 
 
     
     for i, (x,y) in enumerate(obs[player].units.position[player_idx]) :
-            reward = reward.at[i].add(target[x,y]*units_mask[i]/100)
+            reward = reward.at[i].add(target[x,y]*units_mask[i]/20)
             target = target.at[x,y].set(1-units_mask[i])
 
     delta_energy = (obs[player].units.energy[player_idx] - previous_obs[player].units.energy[player_idx]) * jnp.where(previous_obs[player].units.energy[player_idx]>=0,1,0)
-    reward = reward + units_mask * (delta_energy/(6000*jnp.clip(obs[player].units.energy[player_idx],min=2))) * jnp.where(obs[player].match_steps==0,0,1)
+    reward = reward + units_mask * (delta_energy/(6000*jnp.log(jnp.clip(obs[player].units.energy[player_idx],min=2)))) * jnp.where(obs[player].match_steps==0,0,1)
 
-    reward = reward - units_mask * jnp.where(obs[player].units.energy[player_idx]<0,1,0)/10
+    reward = reward - units_mask * jnp.where(obs[player].units.energy[player_idx]<0,1,0)/50
 
     allies_position = obs[player].units.position[player_idx]
     enemies_position = obs[player].units.position[1-player_idx]
@@ -396,7 +396,7 @@ def compute_reward(obs,previous_obs,action,new_distance,distance,target,player) 
     ty_touche = jnp.where(ty_min<=enemies_position[:,1],1,0) * jnp.where(enemies_position[:,1]<=ty_max,1,0)
     touche = tx_touche * ty_touche
 
-    reward = reward + units_mask * jnp.sum(touche,axis=-1)*jnp.where(action[:,0]==5,1,0)*jnp.where(obs[player].units.energy[1-player_idx]<0,10,1) / 100
+    reward = reward + units_mask * jnp.sum(touche,axis=-1)*jnp.where(action[:,0]==5,1,0)*jnp.where(obs[player].units.energy[1-player_idx]<0,10,1) / 50
 
     return reward
 
@@ -483,10 +483,10 @@ def obs_to_state_dict(obs,ep_params,points,map_memory,player):
     
     if player == 'player_0' :
         units_mask = jnp.where(obs['units_mask'][0],1,0)
-        for i, (x,y) in enumerate(obs['units.position'][0]) :
+        for i, (x,y) in enumerate(obs['units']['position'][0]) :
             state_maps = state_maps.at[x,y].set(units_mask[i])
     else :
-        position_player_1 = obs['units.position'][::-1,:,::-1]
+        position_player_1 = obs['units']['position'][::-1,:,::-1]
         position_player_1 = jnp.where(position_player_1==-1,-1,23-position_player_1)
         units_mask = jnp.where(obs['units_mask'][1],1,0)
         for i, (x,y) in enumerate(position_player_1[0]) :
@@ -536,8 +536,8 @@ def obs_to_state_dict(obs,ep_params,points,map_memory,player):
     
     if player == 'player_0' :
         # Units
-        list_state_features.append(obs['units.position'].flatten() / map_width)  # position
-        list_state_features.append(obs['units.energy'].flatten() / 400)  # energy
+        list_state_features.append(obs['units']['position'].flatten() / map_width)  # position
+        list_state_features.append(obs['units']['energy'].flatten() / 400)  # energy
         list_state_features.append(jnp.where(obs['units_mask'],1,0).flatten())  # unit_mask
 
         # Game
@@ -577,9 +577,9 @@ def compute_mask_actions_log_probs_dict(obs,ep_params,action_key,actor_action,ac
     max_sap_range = 8
 
     if player=='player_0' :
-        position = obs['units.position'][player_id]
+        position = obs['units']['position'][player_id]
     else :
-        position = obs['units.position'][player_id,:,::-1]
+        position = obs['units']['position'][player_id,:,::-1]
         position = jnp.where(position==-1,-1,23-position)
     
     #Gather information for masking

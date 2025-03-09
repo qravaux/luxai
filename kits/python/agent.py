@@ -1,9 +1,8 @@
 import sys
-
 import flax.serialization
 sys.path.append('../../')
 from lux.utils import direction_to
-from lux.kit import to_numpy
+from lux.kit import to_jax
 import numpy as np
 from jax_policies import jax_Luxai_Agent
 from jax_utils import *
@@ -24,9 +23,14 @@ class Agent():
         self.policy.load_state_dict(torch.load("../../policy/jax_1e-8_A2C/policy_step_234.pth", weights_only=True))
 
     def act(self, step: int, obs, remainingOverageTime: int = 60):
-        obs = to_numpy(flax.serialization.to_state_dict(obs))
+        obs = to_jax(flax.serialization.to_state_dict(obs))
         if step == 0 :
-            self.state_maps, points = generate_map_memory(1)
+            self.state_maps = jnp.zeros((10, 24, 24), dtype=jnp.float32)
+            self.state_maps = self.state_maps.at[:,5].set(-1)
+            self.state_maps = self.state_maps.at[:,4].set(-1)
+            self.state_maps = self.state_maps.at[:,9].set(-1)
+
+            points = jnp.zeros(1, dtype=jnp.float32)
             self.previous_obs = obs
 
         if self.player == 'player_0' :
@@ -36,12 +40,16 @@ class Agent():
         self.previous_obs = obs
 
         self.state_maps ,state_features = obs_to_state_dict(obs,self.env_cfg,points,self.state_maps,self.player)
-        actor_action, actor_dx, actor_dy, value = self.policy(self.state_maps ,state_features,"cpu")
+        actor_action, actor_dx, actor_dy, value = self.policy(jnp.expand_dims(self.state_maps,axis=0) ,jnp.expand_dims(state_features,axis=0),"cpu")
 
         self.rng, action_key = jax.random.split(self.rng,2)
-        action, mask_action, mask_dx, mask_dy, log_prob = compute_mask_actions_log_probs_dict(obs,self.env_cfg,action_key,actor_action,actor_dx, actor_dy,self.player)
+        action, mask_action, mask_dx, mask_dy, log_prob = compute_mask_actions_log_probs_dict(obs,self.env_cfg,action_key,actor_action[0],actor_dx[0], actor_dy[0],self.player)
 
-        return action.numpy()
+        if self.player == 'player_1' :
+            return np.array(swap_action(action))
+        
+        else :
+            return np.array(action)
 
         """
         unit_mask = np.array(obs["units_mask"][self.team_id]) # shape (max_units, )
