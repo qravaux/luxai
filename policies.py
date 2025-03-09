@@ -167,17 +167,19 @@ class Luxai_Agent(nn.Module) :
         state_maps[4] = state_maps[1] + (1-state_maps[0]) * torch.rot90(state_maps[1],2).T
         state_maps[5] = state_maps[2] + (1-state_maps[0]) * torch.rot90(state_maps[2],2).T
 
+        if (step_match == 0) :
+            map_memory[3] = 0
+        if (n_relic == self.max_relic_nodes) or (n_relic == (n_match+1)*2) :
+            map_memory[3] = 1
+
         state_maps[4] = state_maps[4] + (1-state_maps[3]) * map_memory[4] #Add memory
         state_maps[5] = state_maps[5] + (1-state_maps[3]) * map_memory[5]
+        state_maps[3] = map_memory[3] + (1-map_memory[3]) * state_maps[3]
 
-        if ((n_match >= 3) and (step_match>0)) or (n_relic == (n_match+1)*2) or (n_relic==self.max_relic_nodes) :
-            state_maps[3] = map_memory[3] + (1-map_memory[3]) * state_maps[3]
-        
-        else :
+        if not (((n_match >= 3) and (step_match>0)) or (n_relic == (n_match+1)*2) or (n_relic==self.max_relic_nodes)) :
             map_memory[9] = torch.where(map_memory[9]==0,-1,map_memory[9])
-
-        if (n_relic == self.max_relic_nodes) or (n_relic == (n_match+1)*2) :
-            map_relic = state_maps[6] 
+            map_relic = state_maps[6] + (1-state_maps[0])
+            
         else :
             map_relic = state_maps[6] + (1-state_maps[3])
 
@@ -197,8 +199,6 @@ class Luxai_Agent(nn.Module) :
         new_prob = question*points_prob + (1-question) * (-1)
         
         state_maps[9] = torch.where(new_prob > old_prob, new_prob, old_prob)
-        if ((n_match >= 3) and (step_match>0)) or (n_relic == (n_match+1)*2) or (n_relic==self.max_relic_nodes) :
-            state_maps[9] = torch.where(old_prob==0,0,state_maps[9])
         rotated_map = torch.rot90(state_maps[9],2).T
         state_maps[9] = torch.where(state_maps[9] >= rotated_map, state_maps[9], rotated_map)
 
@@ -394,5 +394,5 @@ class Luxai_Agent(nn.Module) :
                 x = self.activation(layer(x))
             value = self.outputs_critic(x)        
 
-        return action, value, mask_action, mask_dx, mask_dy, log_prob
+            return action, value, mask_action, mask_dx, mask_dy, log_prob
     

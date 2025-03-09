@@ -124,8 +124,9 @@ class PrioritizedReplayBuffer:
 if __name__ == "__main__":
 
     print('Initialise training environment...\n')
-    lr0 = 1e-8
-    lr1 = 1e-9
+    lr0 = 1e-6
+    lr1 = 1e-8
+    lr_decay = 0.9995
     max_norm0 = 0.5
     max_norm1 = 0.5
     entropy_coef0 = 0.001
@@ -134,6 +135,7 @@ if __name__ == "__main__":
     weight_decay_1 = 0
     eps = 1e-8
     betas = (0.9,0.999)
+    lmbda = lambda epoch: lr_decay
 
     replay_buffer_capacity = 50000
     batch_size = 100
@@ -148,7 +150,7 @@ if __name__ == "__main__":
     n_episode = 3
     n_steps = batch_size // 2
 
-    file_name = 'A2C_unit_reward'
+    file_name = 'A2C_new_reward'
     save_dir = f"policy/{file_name}"
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -170,6 +172,7 @@ if __name__ == "__main__":
     model_0_gpu.load_state_dict(model_0.state_dict())
     model_0_gpu.cuda(device)
     optimizer_0 = torch.optim.Adam(model_0_gpu.parameters(), lr=lr0, weight_decay=weight_decay_0, eps=eps, betas=betas)
+    scheduler_0 = torch.optim.lr_scheduler.MultiplicativeLR(optimizer_0,lmbda)
     model_0.share_memory()  # For multiprocessing, the model parameters must be shared
 
     model_1 = Luxai_Agent('player_1')
@@ -177,6 +180,7 @@ if __name__ == "__main__":
     model_1_gpu.load_state_dict(model_1.state_dict())
     model_1_gpu.cuda(device)
     optimizer_1 = torch.optim.Adam(model_1_gpu.parameters(), lr=lr1, weight_decay=weight_decay_1, eps=eps, betas=betas)
+    scheduler_1 = torch.optim.lr_scheduler.MultiplicativeLR(optimizer_1,lmbda)
     model_1.share_memory()  # For multiprocessing, the model parameters must be shared
 
     shared_queue = mp.Queue(maxsize=n_batch * (batch_size//n_steps))  # Queue to share data between workers and the main process
@@ -256,7 +260,7 @@ if __name__ == "__main__":
 
             #Compute log_probs and values
             values_,log_probs_ = model_0_gpu.training_forward(states_maps_,states_features_,actions_,mask_actions_,mask_dxs_,mask_dys_)
-            advantages_ = (advantages_ - torch.mean(advantages_,dim=0)) / (torch.std(advantages_,dim=0) + 1e-8)
+            #advantages_ = (advantages_ - torch.mean(advantages_,dim=0)) / (torch.std(advantages_,dim=0) + 1e-8)
         
             # Losses
             entropy_loss_0 = -torch.mean(weights_*torch.sum(torch.exp(log_probs_) * log_probs_,dim=-1))
@@ -277,7 +281,7 @@ if __name__ == "__main__":
 
             #Compute log_probs and values
             values_,log_probs_ = model_1_gpu.training_forward(states_maps_,states_features_,actions_,mask_actions_,mask_dxs_,mask_dys_)
-            advantages_ = (advantages_ - torch.mean(advantages_,dim=0)) / (torch.std(advantages_,dim=0) + 1e-8)
+            #advantages_ = (advantages_ - torch.mean(advantages_,dim=0)) / (torch.std(advantages_,dim=0) + 1e-8)
 
             # Losses
             entropy_loss_1 = -torch.mean(weights_*torch.sum(torch.exp(log_probs_) * log_probs_,dim=-1))
@@ -298,6 +302,9 @@ if __name__ == "__main__":
 
         model_0.load_state_dict(model_0_gpu.state_dict())
         model_1.load_state_dict(model_1_gpu.state_dict())
+
+        scheduler_0.step()
+        scheduler_1.step()
 
         writer.add_scalar("Loss/Policy Loss 0", policy_loss_0.cpu().item(), step_cpt)
         writer.add_scalar("Loss/Policy Loss 1", policy_loss_1.cpu().item(), step_cpt)
