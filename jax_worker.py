@@ -113,11 +113,33 @@ class jax_Luxai_Worker(mp.Process) :
 
             for step in range(505) :
 
-                if not_begin_episode :
+                if not_begin_episode and self.worker_id > 0 :
                     vmap_keys_step = jax.random.split(key_step, self.num_envs)
                     action = vmap_generate_random_action(vmap_keys_step)
                     obs, state, reward, terminated, truncated, info = vmap_step(vmap_keys_step, state, action, env_params)
-                    not_begin_episode = (step<(self.worker_id/self.num_workers)*505)
+                    
+                    points_0, points_1 = vmap_compute_points(obs,previous_obs)
+
+                    target_dist_0, target_0 = vmap_compute_target_distance_matrix(state,obs,'player_0')
+                    distance_0 = vmap_compute_distance(obs,target_dist_0,'player_0')
+                    reward_0 = vmap_compute_reward(obs,previous_obs,action['player_0'],distance_0,old_distance_0,target_0,'player_0')
+
+                    target_dist_1, target_1 = vmap_compute_target_distance_matrix(state,obs,'player_1')
+                    distance_1 = vmap_compute_distance(obs,target_dist_1,'player_1')
+                    reward_1 = vmap_compute_reward(obs,previous_obs,action['player_1'],distance_1,old_distance_1,target_1,'player_1')
+
+                    cumulated_rewards = cumulated_rewards.at[0].add(jnp.mean(reward_0,axis=-1))
+                    cumulated_rewards = cumulated_rewards.at[1].add(jnp.mean(reward_1,axis=-1))
+                    cumulated_points = cumulated_points.at[0].add(points_0)
+                    cumulated_points = cumulated_points.at[1].add(points_1)
+
+                    previous_obs = obs
+                    old_distance_0 = distance_0
+                    old_distance_1 = distance_1
+                    not_begin_episode = ((step+1)<(self.worker_id*self.n_steps))
+                    
+                    if not not_begin_episode :
+                        print(f"worker {self.worker_id} starts at step {step+2}")
                     continue
 
                 episode_start = jnp.ones((self.num_envs,n_units)) * int(step==0)

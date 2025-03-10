@@ -12,12 +12,20 @@ from torch.utils.tensorboard import SummaryWriter
 
 if __name__ == "__main__":
 
-    print('Initialise training environment...\n')
-    num_envs = 512
-    num_workers = 2
+    if not os.path.exists("runs"):
+        # Create directory
+        os.makedirs("runs")
 
-    lr = 1e-10
-    lr_decay = 0.98
+    if not os.path.exists("policy"):
+        # Create directory
+        os.makedirs("policy")
+
+    print('Initialise training environment...\n')
+    num_envs = 333
+    num_workers = 3
+
+    lr = 1e-12
+    lr_decay = 0.99
     max_norm = 0.5
     entropy_coef = 0.001
     weight_decay = 0
@@ -25,18 +33,18 @@ if __name__ == "__main__":
     betas = (0.9,0.999)
     lmbda = lambda epoch: lr_decay
 
-    replay_buffer_capacity = 100000
-    batch_size = 512
+    replay_buffer_capacity = 101000
+    batch_size = 1024
     vf_coef = 0.5
     gamma = 0.995
     gae_lambda = 0.99
     save_rate = 3
 
-    n_epochs = int(1e6)
-    n_steps = 20
-    n_batch = ((num_envs*n_steps*2) // batch_size)*10
+    n_epochs = int(1e9)
+    n_steps = 101
+    n_batch = ((num_envs*n_steps) // batch_size)
 
-    file_name = 'jax_1e-10_A2C'
+    file_name = 'jax_norm_3_worker_1e-10_A2C'
     save_dir = f"policy/{file_name}"
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -63,7 +71,7 @@ if __name__ == "__main__":
     save_path = os.path.join(save_dir, f"policy_step_00.pth")
     torch.save(policy.state_dict(), save_path)
 
-    print('Instantiate workers...')
+    print('Instantiate workers...')         
     workers = []
     for i in range(num_workers) :
         worker = jax_Luxai_Worker(i,
@@ -79,13 +87,13 @@ if __name__ == "__main__":
                                 n_epochs,
                                 file_name,
                                 'cpu')
-        print(f'--------worker {i} is ready')
+        print(f'-------------------------worker {i} is ready')
         workers.append(worker)
         worker.start()
 
     print('Done\n')
 
-    while queue.qsize() == 0 :
+    while queue.qsize() < num_workers :
             waiting = True
     # Main training loop: Collect experiences from worker and update the model
     print('Start training...\n')
@@ -127,7 +135,8 @@ if __name__ == "__main__":
 
             #Compute log_probs and values
             values_,log_probs_ = policy_gpu.training_forward(states_maps_,states_features_,actions_,mask_actions_,mask_dxs_,mask_dys_)
-            #advantages_ = (advantages_ - torch.mean(advantages_,dim=0)) / (torch.std(advantages_,dim=0) + 1e-8)
+            advantages_ = (advantages_ - torch.mean(advantages_,dim=0)) / (torch.std(advantages_,dim=0) + 1e-8)
+            returns_ = (returns_ - torch.mean(returns_,dim=0)) / (torch.std(returns_,dim=0) + 1e-8)
         
             # Losses
             entropy_loss = -torch.mean(weights_*torch.sum(torch.exp(log_probs_) * log_probs_,dim=-1))
@@ -142,7 +151,7 @@ if __name__ == "__main__":
             torch.nn.utils.clip_grad_norm_(policy.parameters(), max_norm=max_norm)
             optimizer.step()
 
-            buffer.update_priorities(batch_indices=indices_,batch_priorities=torch.abs(torch.sum(values_,dim=-1)).detach())
+            buffer.update_priorities(batch_indices=indices_,batch_priorities=torch.abs(torch.sum(advantages_+values_,dim=-1)).detach())
 
         scheduler.step()
         policy.load_state_dict(policy_gpu.state_dict())
@@ -154,7 +163,7 @@ if __name__ == "__main__":
 
         if epoch % save_rate == 0 :
             if not os.path.exists(save_dir):
-                # Créer le dossier
+                # Create directory
                 os.makedirs(save_dir)
             save_path = os.path.join(save_dir, f"policy_step_{epoch}.pth")
             torch.save(policy.state_dict(), save_path)
