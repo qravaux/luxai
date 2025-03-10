@@ -2,10 +2,6 @@ import os
 from jax_utils import *
 from jax_policies import jax_Luxai_Agent
 from jax_worker import jax_Luxai_Worker
-import jax
-import jax.numpy as jnp
-from tqdm import tqdm
-import numpy as np
 import torch
 import torch.multiprocessing as mp
 from torch.utils.tensorboard import SummaryWriter

@@ -1,11 +1,11 @@
 import sys
-import flax.serialization
 sys.path.append('../../')
+import flax.serialization
 from lux.utils import direction_to
 from lux.kit import to_jax
 import numpy as np
-from jax_policies import jax_Luxai_Agent
-from jax_utils import *
+from jax_based_agent.jax_policies import jax_Luxai_Agent
+from jax_based_agent.jax_utils import *
 import flax.serialization
 import torch
 

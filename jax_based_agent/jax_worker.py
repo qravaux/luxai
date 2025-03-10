@@ -1,15 +1,12 @@
+import sys
+sys.path.append('../')
 import torch.multiprocessing as mp
-
-import os
 from jax_utils import *
-from jax_policies import jax_Luxai_Agent
 from src.luxai_s3.env import LuxAIS3Env
 import jax
 import jax.numpy as jnp
 import time
-import numpy as np
 import torch
-from torch.utils.tensorboard import SummaryWriter
 
 class jax_Luxai_Worker(mp.Process) :
 

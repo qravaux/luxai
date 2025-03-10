@@ -1,9 +1,9 @@
+import sys
+sys.path.append('../')
 import random 
 import torch
 import torch.multiprocessing as mp
 import numpy as np
-import time
-import matplotlib.pyplot as plt
 import scipy
 from src.luxai_s3.env import LuxAIS3Env
 from src.luxai_s3.params import EnvParams, env_params_ranges

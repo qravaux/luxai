@@ -1,11 +1,9 @@
 import os
+import sys
+sys.path.append('../')
 import torch
-from torch.utils.data import Dataset, DataLoader
-import torch.nn.functional as F
 import torch.multiprocessing as mp
 from torch.utils.tensorboard import SummaryWriter
-from torch import nn
-
 from src.luxai_s3.wrappers import LuxAIS3GymEnv
 from policies import Luxai_Agent
 from workers import Luxai_Worker
