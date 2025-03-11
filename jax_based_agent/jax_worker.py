@@ -53,7 +53,7 @@ class jax_Luxai_Worker(mp.Process) :
         vmap_compute_points = jax.vmap(compute_points, in_axes=(0,0))
         vmap_compute_target_distance_matrix = jax.vmap(compute_target_distance_matrix, in_axes=(0,0,None))
         vmap_compute_distance = jax.vmap(compute_distance, in_axes=(0,0,None))
-        vmap_compute_reward = jax.vmap(compute_reward,in_axes=(0,0,0,0,0,0,None))
+        vmap_compute_reward = jax.vmap(compute_reward,in_axes=(0,0,0,0,0,0,0,None))
         vmap_swap_action = jax.vmap(swap_action,in_axes=0)
         vmap_generate_random_action = jax.vmap(generate_random_action,in_axes=0)
 
@@ -83,6 +83,7 @@ class jax_Luxai_Worker(mp.Process) :
         b_mask_action = jnp.zeros((self.n_steps,2,self.num_envs,n_units,n_action),dtype=jnp.float32)
         b_mask_dx = jnp.zeros((self.n_steps,2,self.num_envs,n_units,sap_range*2+1),dtype=jnp.float32)
         b_mask_dy = jnp.zeros((self.n_steps,2,self.num_envs,n_units,sap_range*2+1),dtype=jnp.float32)
+        b_mask_unit = jnp.zeros((self.n_steps,2,self.num_envs,n_units),dtype=jnp.float32)
         b_episode_start = jnp.zeros((self.n_steps,2,self.num_envs,n_units),dtype=jnp.float32)
 
         start = time.time()
@@ -174,11 +175,11 @@ class jax_Luxai_Worker(mp.Process) :
 
                 target_dist_0, target_0 = vmap_compute_target_distance_matrix(state,obs,'player_0')
                 distance_0 = vmap_compute_distance(obs,target_dist_0,'player_0')
-                reward_0 = vmap_compute_reward(obs,previous_obs,action_0,distance_0,old_distance_0,target_0,'player_0')
+                reward_0, units_mask_0 = vmap_compute_reward(obs,previous_obs,env_params,action_0,distance_0,old_distance_0,target_0,'player_0')
 
                 target_dist_1, target_1 = vmap_compute_target_distance_matrix(state,obs,'player_1')
                 distance_1 = vmap_compute_distance(obs,target_dist_1,'player_1')
-                reward_1 = vmap_compute_reward(obs,previous_obs,action_1,distance_1,old_distance_1,target_1,'player_1')
+                reward_1, units_mask_1 = vmap_compute_reward(obs,previous_obs,env_params,action_1,distance_1,old_distance_1,target_1,'player_1')
 
                 cumulated_rewards = cumulated_rewards.at[0].add(jnp.mean(reward_0,axis=-1))
                 cumulated_rewards = cumulated_rewards.at[1].add(jnp.mean(reward_1,axis=-1))
@@ -206,9 +207,10 @@ class jax_Luxai_Worker(mp.Process) :
                     m_a = torch.tensor(b_mask_action).flatten(0,2)
                     m_x = torch.tensor(b_mask_dx).flatten(0,2)
                     m_y = torch.tensor(b_mask_dy).flatten(0,2)
+                    u_m = torch.tensor(b_mask_unit).flatten(0,2)
                     
                     print(f'worker {self.worker_id} complete step n°{queue_cpt} at speed of {round((self.n_steps*self.num_envs)/(time.time()-start),1)}it/s')
-                    self.queue.put((s_m,s_f,ac,ad,re,lo,m_a,m_x,m_y))
+                    self.queue.put((s_m,s_f,ac,ad,re,lo,m_a,m_x,m_y,u_m))
                     start = time.time()
 
                     steps_cpt = 0
@@ -221,6 +223,7 @@ class jax_Luxai_Worker(mp.Process) :
                     b_mask_action = jnp.zeros((self.n_steps,2,self.num_envs,n_units,n_action),dtype=jnp.float32)
                     b_mask_dx = jnp.zeros((self.n_steps,2,self.num_envs,n_units,sap_range*2+1),dtype=jnp.float32)
                     b_mask_dy = jnp.zeros((self.n_steps,2,self.num_envs,n_units,sap_range*2+1),dtype=jnp.float32)
+                    b_mask_unit = jnp.zeros((self.n_steps,2,self.num_envs,n_units),dtype=jnp.float32)
                     b_episode_start = jnp.zeros((self.n_steps,2,self.num_envs,n_units),dtype=jnp.float32)
                 
                 b_state_maps = b_state_maps.at[steps_cpt,0].set(state_maps_0)
@@ -232,6 +235,7 @@ class jax_Luxai_Worker(mp.Process) :
                 b_mask_action = b_mask_action.at[steps_cpt,0].set(mask_action_0)
                 b_mask_dx = b_mask_dx.at[steps_cpt,0].set(mask_dx_0)
                 b_mask_dy = b_mask_dy.at[steps_cpt,0].set(mask_dy_0)
+                b_mask_unit = b_mask_unit.at[steps_cpt,0].set(units_mask_0)
                 b_episode_start = b_episode_start.at[steps_cpt,0].set(episode_start)
 
                 b_state_maps = b_state_maps.at[steps_cpt,1].set(state_maps_1)
@@ -243,6 +247,7 @@ class jax_Luxai_Worker(mp.Process) :
                 b_mask_action = b_mask_action.at[steps_cpt,1].set(mask_action_1)
                 b_mask_dx = b_mask_dx.at[steps_cpt,1].set(mask_dx_1)
                 b_mask_dy = b_mask_dy.at[steps_cpt,1].set(mask_dy_1)
+                b_mask_unit = b_mask_unit.at[steps_cpt,1].set(units_mask_1)
                 b_episode_start = b_episode_start.at[steps_cpt,1].set(episode_start)
 
                 steps_cpt += 1

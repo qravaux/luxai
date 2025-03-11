@@ -72,13 +72,13 @@ class jax_Luxai_Agent(nn.Module) :
         self.inputs_actor = nn.Linear(self.n_inputs_features,self.actor_size[0],dtype=torch.float32)
         self.hidden_actor = nn.ModuleList([nn.Linear(self.actor_size[i],self.actor_size[i+1],dtype=torch.float32) for i in range(len(self.actor_size)-1)])
 
-        self.actor_action_layer = nn.Linear(self.actor_size[-1],self.n_action*self.n_units,dtype=torch.float32)
-        self.actor_dx_layer = nn.Linear(self.actor_size[-1],(self.max_sap_range*2+1)*self.n_units,dtype=torch.float32)
-        self.actor_dy_layer = nn.Linear(self.actor_size[-1],(self.max_sap_range*2+1)*self.n_units,dtype=torch.float32)
+        self.actor_action_layer = nn.ModuleList([nn.Linear(self.actor_size[-1],self.n_action,dtype=torch.float32) for _ in range(self.n_units)])
+        self.actor_dx_layer = nn.ModuleList([nn.Linear(self.actor_size[-1],(self.max_sap_range*2+1),dtype=torch.float32) for _ in range(self.n_units)])
+        self.actor_dy_layer = nn.ModuleList([nn.Linear(self.actor_size[-1],(self.max_sap_range*2+1),dtype=torch.float32) for _ in range(self.n_units)])
 
         self.inputs_critic = nn.Linear(self.n_inputs_features,self.critic_size[0],dtype=torch.float32)
         self.hidden_critic = nn.ModuleList([nn.Linear(self.critic_size[i],self.critic_size[i+1],dtype=torch.float32) for i in range(len(self.critic_size)-1)])
-        self.outputs_critic = nn.Linear(self.critic_size[-1],self.n_units,dtype=torch.float32)
+        self.outputs_critic = nn.ModuleList([nn.Linear(self.critic_size[-1],self.n_units,dtype=torch.float32) for _ in range(self.n_units)])
 
         #Initialization
         nn.init.orthogonal_(self.cnn_inputs_actor.weight,gain=self.gain)
@@ -109,17 +109,18 @@ class jax_Luxai_Agent(nn.Module) :
             nn.init.orthogonal_(layers.weight,gain=self.gain)
             nn.init.zeros_(layers.bias)
 
-        nn.init.orthogonal_(self.actor_action_layer.weight,gain=0.01)
-        nn.init.zeros_(self.actor_action_layer.bias)
+        for unit in range(self.n_units) :
+            nn.init.orthogonal_(self.actor_action_layer[unit].weight,gain=0.01)
+            nn.init.zeros_(self.actor_action_layer[unit].bias)
 
-        nn.init.orthogonal_(self.actor_dx_layer.weight,gain=0.01)
-        nn.init.zeros_(self.actor_dx_layer.bias)
+            nn.init.orthogonal_(self.actor_dx_layer[unit].weight,gain=0.01)
+            nn.init.zeros_(self.actor_dx_layer[unit].bias)
 
-        nn.init.orthogonal_(self.actor_dy_layer.weight,gain=0.01)
-        nn.init.zeros_(self.actor_dy_layer.bias)
+            nn.init.orthogonal_(self.actor_dy_layer[unit].weight,gain=0.01)
+            nn.init.zeros_(self.actor_dy_layer[unit].bias)
 
-        nn.init.orthogonal_(self.outputs_critic.weight,gain=1)
-        nn.init.zeros_(self.outputs_critic.bias)
+            nn.init.orthogonal_(self.outputs_critic[unit].weight,gain=1)
+            nn.init.zeros_(self.outputs_critic[unit].bias)
 
     def forward(self,x_maps,x_features,device) :
 
@@ -140,9 +141,18 @@ class jax_Luxai_Agent(nn.Module) :
             for layer in self.hidden_actor :
                 x = self.activation(layer(x))
 
-            actor_action = self.final_activation(self.actor_action_layer(x)).view(-1,self.n_units,self.n_action)
-            actor_dx = self.final_activation(self.actor_dx_layer(x)).view(-1,self.n_units,self.max_sap_range*2+1)
-            actor_dy = self.final_activation(self.actor_dy_layer(x)).view(-1,self.n_units,self.max_sap_range*2+1)
+            action_output = []
+            dx_output = []
+            dy_output = []
+
+            for unit in range(self.n_units) :
+                action_output.append(self.final_activation(self.actor_action_layer[unit](x)))
+                dx_output.append(self.final_activation(self.actor_dx_layer[unit](x)))
+                dy_output.append(self.final_activation(self.actor_dy_layer[unit](x)))
+
+            actor_action = torch.stack(action_output,dim=-2)
+            actor_dx = torch.stack(dx_output,dim=-2)
+            actor_dy = torch.stack(dy_output,dim=-2)
 
             #Critic part
             x = self.activation(self.cnn_inputs_critic(x_maps))
@@ -156,7 +166,11 @@ class jax_Luxai_Agent(nn.Module) :
             x = self.activation(self.inputs_critic(x_input))
             for layer in self.hidden_critic :
                 x = self.activation(layer(x))
-            value = self.outputs_critic(x)  
+
+            value_output = []
+            for critic_unit in self.outputs_critic :
+                value_output.append(critic_unit(x))
+            value = torch.stack(value_output,dim=-2)
 
             actor_action = jnp.array(actor_action.cpu(),dtype=jnp.float32)
             actor_dx = jnp.array(actor_dx.cpu(),dtype=jnp.float32)
@@ -180,9 +194,18 @@ class jax_Luxai_Agent(nn.Module) :
         for layer in self.hidden_actor :
             x = self.activation(layer(x))
 
-        actor_action = self.final_activation(self.actor_action_layer(x)).view(batch_size,self.n_units,self.n_action) - mask_action*100
-        actor_dx = self.final_activation(self.actor_dx_layer(x)).view(batch_size,self.n_units,self.max_sap_range*2+1) - mask_dx*100
-        actor_dy = self.final_activation(self.actor_dy_layer(x)).view(batch_size,self.n_units,self.max_sap_range*2+1) - mask_dy*100
+        action_output = []
+        dx_output = []
+        dy_output = []
+
+        for unit in range(self.n_units) :
+            action_output.append(self.final_activation(self.actor_action_layer[unit](x)))
+            dx_output.append(self.final_activation(self.actor_dx_layer[unit](x)))
+            dy_output.append(self.final_activation(self.actor_dy_layer[unit](x)))
+
+        actor_action = torch.stack(action_output,dim=-2) - mask_action*100
+        actor_dx = torch.stack(dx_output,dim=-2) - mask_dx*100
+        actor_dy = torch.stack(dy_output,dim=-2) - mask_dy*100
 
         actor_action = F.log_softmax(actor_action,dim=-1)
         actor_dx = F.log_softmax(actor_dx,dim=-1)
@@ -207,7 +230,11 @@ class jax_Luxai_Agent(nn.Module) :
         x = self.activation(self.inputs_critic(x_input))
         for layer in self.hidden_critic :
             x = self.activation(layer(x))
-        value = self.outputs_critic(x)
+
+        value_output = []
+        for critic_unit in self.outputs_critic :
+            value_output.append(critic_unit(x))
+        value = torch.stack(value_output,dim=-2)
 
         return value,log_prob
     

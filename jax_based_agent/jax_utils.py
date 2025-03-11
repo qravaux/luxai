@@ -1,3 +1,5 @@
+import sys
+sys.path.append('../')
 import torch
 import jax
 import jax.numpy as jnp
@@ -29,6 +31,7 @@ class PrioritizedReplayBuffer:
         self. mask_actions_buffer = torch.zeros(self.capacity,self.n_units,self.n_action,dtype=torch.float32).to(device)
         self.mask_dxs_buffer = torch.zeros(self.capacity,self.n_units,self.sap_range*2+1,dtype=torch.float32).to(device)
         self.mask_dys_buffer = torch.zeros(self.capacity,self.n_units,self.sap_range*2+1,dtype=torch.float32).to(device)
+        self.units_mask_buffer = torch.zeros(self.capacity,self.n_units,dtype=torch.float32).to(device)
 
         self.priorities.requires_grad = False
         self.advantages_buffer.requires_grad = False
@@ -37,7 +40,7 @@ class PrioritizedReplayBuffer:
         self.states_maps_buffer.requires_grad = False
         self.states_features_buffer.requires_grad = False
 
-    def add(self,states_maps,states_features,actions,advantages,returns,log_probs,mask_actions,mask_dxs,mask_dys):
+    def add(self,states_maps,states_features,actions,advantages,returns,log_probs,mask_actions,mask_dxs,mask_dys,units_mask):
         max_prio = torch.max(self.priorities)
         n_add = len(states_maps)
         if n_add + self.position <= self.capacity :
@@ -51,6 +54,7 @@ class PrioritizedReplayBuffer:
             self. mask_actions_buffer[self.position:self.position+n_add] = mask_actions
             self.mask_dxs_buffer[self.position:self.position+n_add] = mask_dxs
             self.mask_dys_buffer[self.position:self.position+n_add] = mask_dys
+            self.units_mask_buffer[self.position:self.position+n_add] = units_mask
             self.priorities[self.position:self.position+n_add] = max_prio
 
         else:
@@ -65,6 +69,7 @@ class PrioritizedReplayBuffer:
             self. mask_actions_buffer[self.position:] = mask_actions[:n_add-n_over]
             self.mask_dxs_buffer[self.position:] = mask_dxs[:n_add-n_over]
             self.mask_dys_buffer[self.position:] = mask_dys[:n_add-n_over]
+            self.units_mask_buffer[self.position:] = units_mask[:n_add-n_over]
             self.priorities[self.position:] = max_prio
 
             self.states_maps_buffer[:n_over] = states_maps[n_add-n_over:]
@@ -76,6 +81,7 @@ class PrioritizedReplayBuffer:
             self. mask_actions_buffer[:n_over] = mask_actions[n_add-n_over:]
             self.mask_dxs_buffer[:n_over] = mask_dxs[n_add-n_over:]
             self.mask_dys_buffer[:n_over] = mask_dys[n_add-n_over:]
+            self.units_mask_buffer[:n_over] = units_mask[n_add-n_over:]
             self.priorities[:n_over] = max_prio
         
         self.position = (self.position + n_add) % self.capacity
@@ -107,8 +113,9 @@ class PrioritizedReplayBuffer:
         mask_actions = self. mask_actions_buffer[indices]
         mask_dxs = self.mask_dxs_buffer[indices]
         mask_dys = self.mask_dys_buffer[indices]
+        units_mask = self.units_mask_buffer[indices]
 
-        return states_maps, states_features, actions, advantages, returns, log_probs, mask_actions, mask_dxs, mask_dys, weights, indices
+        return states_maps, states_features, actions, advantages, returns, log_probs, mask_actions, mask_dxs, mask_dys, units_mask, weights, indices
 
     
     def update_priorities(self, batch_indices, batch_priorities):
@@ -272,9 +279,19 @@ def compute_mask_actions_log_probs(obs,ep_params,action_key,actor_action,actor_d
     sap_mask = jnp.where(obs.units.energy[player_id]<ep_params.unit_sap_cost,1,0)
 
     #Compute action masks
+    """
     mask_action = jnp.zeros((n_units,n_action),dtype=jnp.int32)
     mask_dx = jnp.zeros((n_units,max_sap_range*2+1),dtype=jnp.int32)
     mask_dy = jnp.zeros((n_units,max_sap_range*2+1),dtype=jnp.int32)
+    """
+    mask_action = jnp.ones((n_units,n_action),dtype=jnp.int32)
+    mask_dx = jnp.ones((n_units,max_sap_range*2+1),dtype=jnp.int32)
+    mask_dy = jnp.ones((n_units,max_sap_range*2+1),dtype=jnp.int32)
+
+    mask_action = mask_action.at[0].set(0)
+    mask_action = mask_action.at[:,0].set(0)
+    mask_dx = mask_dx.at[0].set(0)
+    mask_dx = mask_dx.at[0].set(0)
 
     mask_action = mask_action.at[:,1:].add(energy_mask)
     mask_action = mask_action.at[:,-1].add(sap_mask)
@@ -367,21 +384,19 @@ def compute_target_distance_matrix(state,obs,player) :
 
     return min_manhattan_dist(target*unit_patch), target
         
-def compute_reward(obs,previous_obs,action,new_distance,distance,target,player) :
+def compute_reward(obs,previous_obs,ep_params,action,new_distance,distance,target,player) :
     player_idx = jnp.where(player=='player_1',1,0)
     units_mask = jnp.where(obs[player].units_mask[player_idx],1,0)
-    reward = -jnp.ones(16,dtype=jnp.int32) / 505
+    reward = -jnp.ones(16,dtype=jnp.int32) * jnp.where(obs[player].units.energy[player_idx]<ep_params.unit_move_cost,1,0) / 505
     delta_distance = new_distance - distance
     reward = reward - units_mask*(jnp.where(jnp.abs(delta_distance)>1,0,delta_distance)/(24*24)) * jnp.where(obs[player].match_steps==0,0,1)
-
     
     for i, (x,y) in enumerate(obs[player].units.position[player_idx]) :
-            reward = reward.at[i].add(target[x,y]*units_mask[i]/20)
-            target = target.at[x,y].set(1-units_mask[i])
+        reward = reward.at[i].add(target[x,y]*units_mask[i]/20)
+        target = target.at[x,y].set(1-units_mask[i])
 
     delta_energy = (obs[player].units.energy[player_idx] - previous_obs[player].units.energy[player_idx]) * jnp.where(previous_obs[player].units.energy[player_idx]>=0,1,0)
-    reward = reward + units_mask * (delta_energy/(6000*jnp.log(jnp.clip(obs[player].units.energy[player_idx],min=2)))) * jnp.where(obs[player].match_steps==0,0,1)
-
+    reward = reward + units_mask * (delta_energy/(20000*jnp.log(jnp.clip(obs[player].units.energy[player_idx],min=2)))) * jnp.where(obs[player].match_steps==0,0,1)
     reward = reward - units_mask * jnp.where(obs[player].units.energy[player_idx]<0,1,0)/50
 
     allies_position = obs[player].units.position[player_idx]
@@ -398,7 +413,7 @@ def compute_reward(obs,previous_obs,action,new_distance,distance,target,player) 
 
     reward = reward + units_mask * jnp.sum(touche,axis=-1)*jnp.where(action[:,0]==5,1,0)*jnp.where(obs[player].units.energy[1-player_idx]<0,10,1) / 50
 
-    return reward
+    return reward, units_mask
 
 def min_manhattan_dist(matrix):
     # Initialize distance matrix: 0 for ones, inf for others

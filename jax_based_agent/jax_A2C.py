@@ -40,7 +40,7 @@ if __name__ == "__main__":
     n_steps = 101
     n_batch = ((num_envs*n_steps) // batch_size)
 
-    file_name = 'jax_norm_3_worker_1e-10_A2C'
+    file_name = 'separated_unit_networks'
     save_dir = f"policy/{file_name}"
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -100,7 +100,7 @@ if __name__ == "__main__":
 
         # Collect data from worker
         while queue.qsize() > 0 :
-            states_maps,states_features,actions,advantages,returns,log_probs,mask_actions,mask_dxs,mask_dys = queue.get()
+            states_maps,states_features,actions,advantages,returns,log_probs,mask_actions,mask_dxs,mask_dys,units_mask = queue.get()
 
             buffer.add(states_maps,
                         states_features,
@@ -110,7 +110,8 @@ if __name__ == "__main__":
                         log_probs,
                         mask_actions,
                         mask_dxs,
-                        mask_dys)
+                        mask_dys,
+                        units_mask)
             
         while reward_queue.qsize() > 0 :
             reward = reward_queue.get()
@@ -127,7 +128,7 @@ if __name__ == "__main__":
         #Train policy
         for _ in range(n_batch) :
 
-            states_maps_, states_features_, actions_, advantages_, returns_, p_log_probs_, mask_actions_, mask_dxs_, mask_dys_, weights_, indices_ = buffer.sample(batch_size=batch_size,device=device)
+            states_maps_, states_features_, actions_, advantages_, returns_, p_log_probs_, mask_actions_, mask_dxs_, mask_dys_,units_mask_, weights_, indices_ = buffer.sample(batch_size=batch_size,device=device)
 
             #Compute log_probs and values
             values_,log_probs_ = policy_gpu.training_forward(states_maps_,states_features_,actions_,mask_actions_,mask_dxs_,mask_dys_)
@@ -135,9 +136,9 @@ if __name__ == "__main__":
             returns_ = (returns_ - torch.mean(returns_,dim=0)) / (torch.std(returns_,dim=0) + 1e-8)
         
             # Losses
-            entropy_loss = -torch.mean(weights_*torch.sum(torch.exp(log_probs_) * log_probs_,dim=-1))
-            policy_loss = -torch.mean(weights_*torch.sum(log_probs_ * advantages_,dim=-1))
-            value_loss = torch.mean(weights_*torch.sum(torch.pow(values_ - returns_,2),dim=-1))
+            entropy_loss = -torch.mean(weights_*torch.sum(units_mask_ * torch.exp(log_probs_) * log_probs_,dim=-1))
+            policy_loss = -torch.mean(weights_*torch.sum(units_mask_ * log_probs_ * advantages_,dim=-1))
+            value_loss = torch.mean(weights_*torch.sum(units_mask_ * torch.pow(values_ - returns_,2),dim=-1))
 
             loss = policy_loss + vf_coef *value_loss + entropy_coef * entropy_loss
 
