@@ -16,6 +16,7 @@ class jax_Luxai_Worker(mp.Process) :
                  queue,
                  reward_queue,
                  point_queue,
+                 intermediate_reward,
                  num_envs,
                  num_workers,
                  gamma, 
@@ -32,6 +33,7 @@ class jax_Luxai_Worker(mp.Process) :
         self.queue = queue
         self.reward_queue = reward_queue
         self.point_queue = point_queue
+        self.intermediate_reward = intermediate_reward
         self.num_envs = num_envs
         self.num_workers = num_workers
         self.gamma = gamma
@@ -58,8 +60,7 @@ class jax_Luxai_Worker(mp.Process) :
         vmap_generate_random_action = jax.vmap(generate_random_action,in_axes=0)
 
         #Create rng keys and counters
-        rng = jax.random.key(0)
-        rng, key_reset, key_step = jax.random.split(rng, 3)
+        rng = jax.random.key(56)#self.worker_id)
 
         steps_cpt = 0
         queue_cpt = 0
@@ -73,6 +74,8 @@ class jax_Luxai_Worker(mp.Process) :
         n_units = 16
         n_action = 6
         sap_range = 8
+        match_len = 101
+        n_match = 5
 
         b_state_maps = jnp.zeros((self.n_steps,2,self.num_envs,n_inputs_maps,map_width,map_height),dtype=jnp.float32)
         b_state_features = jnp.zeros((self.n_steps,2,self.num_envs,n_inputs_features),dtype=jnp.float32)
@@ -86,15 +89,20 @@ class jax_Luxai_Worker(mp.Process) :
         b_mask_unit = jnp.zeros((self.n_steps,2,self.num_envs,n_units),dtype=jnp.float32)
         b_episode_start = jnp.zeros((self.n_steps,2,self.num_envs,n_units),dtype=jnp.float32)
 
+        rng, key_reset = jax.random.split(rng, 2)
+        vmap_key_params = jnp.array([key_reset] * self.num_envs)
+        vmap_key_reset = jnp.array([key_reset] * self.num_envs)
+
         start = time.time()
         for episode in range(self.n_episode):
-
             #Generate random env params
-            vmap_key_params = jax.random.split(key_reset, self.num_envs)
+            #rng, key_reset = jax.random.split(rng, 2)
+            #vmap_key_params = jax.random.split(key_reset, self.num_envs)
             env_params = vmap_random_gen(vmap_key_params)
 
             #Reset environment, map memory and points
-            vmap_key_reset = jax.random.split(key_reset, self.num_envs)
+            #rng, key_reset = jax.random.split(rng, 2)
+            #vmap_key_reset = jax.random.split(key_reset, self.num_envs)
             obs, state = vmap_reset(vmap_key_reset, env_params)
             state_maps_0, points_0 = generate_map_memory(self.num_envs)
             state_maps_1, points_1 = generate_map_memory(self.num_envs)
@@ -109,9 +117,10 @@ class jax_Luxai_Worker(mp.Process) :
             cumulated_rewards = jnp.zeros((2,self.num_envs))
             cumulated_points = jnp.zeros((2,self.num_envs))
 
-            for step in range(505) :
+            for step in range(match_len*n_match) :
 
-                if not_begin_episode and self.worker_id > 0 :
+                if not_begin_episode :
+                    rng, key_step = jax.random.split(rng, 2)
                     vmap_keys_step = jax.random.split(key_step, self.num_envs)
                     action = vmap_generate_random_action(vmap_keys_step)
                     obs, state, reward, terminated, truncated, info = vmap_step(vmap_keys_step, state, action, env_params)
@@ -120,11 +129,11 @@ class jax_Luxai_Worker(mp.Process) :
 
                     target_dist_0, target_0 = vmap_compute_target_distance_matrix(state,obs,'player_0')
                     distance_0 = vmap_compute_distance(obs,target_dist_0,'player_0')
-                    reward_0 = vmap_compute_reward(obs,previous_obs,action['player_0'],distance_0,old_distance_0,target_0,'player_0')
+                    reward_0, units_mask_0 = vmap_compute_reward(obs,previous_obs,env_params,action['player_0'],distance_0,old_distance_0,target_0,'player_0')
 
                     target_dist_1, target_1 = vmap_compute_target_distance_matrix(state,obs,'player_1')
                     distance_1 = vmap_compute_distance(obs,target_dist_1,'player_1')
-                    reward_1 = vmap_compute_reward(obs,previous_obs,action['player_1'],distance_1,old_distance_1,target_1,'player_1')
+                    reward_1, units_mask_1 = vmap_compute_reward(obs,previous_obs,env_params,action['player_1'],distance_1,old_distance_1,target_1,'player_1')
 
                     cumulated_rewards = cumulated_rewards.at[0].add(jnp.mean(reward_0,axis=-1))
                     cumulated_rewards = cumulated_rewards.at[1].add(jnp.mean(reward_1,axis=-1))
@@ -134,16 +143,14 @@ class jax_Luxai_Worker(mp.Process) :
                     previous_obs = obs
                     old_distance_0 = distance_0
                     old_distance_1 = distance_1
-                    not_begin_episode = ((step+1)<(self.worker_id*self.n_steps))
+                    not_begin_episode = ((step+1)<(((self.worker_id+1)*2*self.n_steps)%(match_len*n_match)))
                     
                     if not not_begin_episode :
                         print(f"worker {self.worker_id} starts at step {step+2}")
                     continue
 
-                episode_start = jnp.ones((self.num_envs,n_units)) * int(step==0)
-                points_0, points_1 = vmap_compute_points(obs,previous_obs)
-
                 #Generate new step keys
+                rng, key_step = jax.random.split(rng, 2)
                 vmap_keys_step = jax.random.split(key_step, self.num_envs)
                 #Compute state and action for player 0
                 state_maps_0, state_features_0 = vmap_obs_to_state(obs, env_params, points_0, state_maps_0, 'player_0')
@@ -157,6 +164,7 @@ class jax_Luxai_Worker(mp.Process) :
                                                                                                                 'player_0') 
                 
                 #Generate new step keys
+                rng, key_step = jax.random.split(rng, 2)
                 vmap_keys_step = jax.random.split(key_step, self.num_envs)
                 #Compute state and action for player 1
                 state_maps_1, state_features_1 = vmap_obs_to_state(obs, env_params, points_1, state_maps_1, 'player_1')
@@ -168,9 +176,11 @@ class jax_Luxai_Worker(mp.Process) :
                                                                                                                 actor_dx_1,
                                                                                                                 actor_dy_1,
                                                                                                                 'player_1')
-                
+
                 #Gather action from both players and computing next step
                 action = dict(player_0=action_0,player_1=vmap_swap_action(action_1))
+                rng, key_step = jax.random.split(rng, 2)
+                vmap_keys_step = jax.random.split(key_step, self.num_envs)
                 obs, state, reward, terminated, truncated, info = vmap_step(vmap_keys_step, state, action, env_params)
 
                 target_dist_0, target_0 = vmap_compute_target_distance_matrix(state,obs,'player_0')
@@ -180,6 +190,9 @@ class jax_Luxai_Worker(mp.Process) :
                 target_dist_1, target_1 = vmap_compute_target_distance_matrix(state,obs,'player_1')
                 distance_1 = vmap_compute_distance(obs,target_dist_1,'player_1')
                 reward_1, units_mask_1 = vmap_compute_reward(obs,previous_obs,env_params,action_1,distance_1,old_distance_1,target_1,'player_1')
+
+                points_0, points_1 = vmap_compute_points(obs,previous_obs)
+                episode_start = jnp.ones((self.num_envs,n_units)) * int(step==0)
 
                 cumulated_rewards = cumulated_rewards.at[0].add(jnp.mean(reward_0,axis=-1))
                 cumulated_rewards = cumulated_rewards.at[1].add(jnp.mean(reward_1,axis=-1))
@@ -195,7 +208,6 @@ class jax_Luxai_Worker(mp.Process) :
                     queue_cpt += 1
 
                     b_advantage = compute_advantage(b_value,b_episode_start,b_reward,episode_start,jnp.stack([value_0,value_1],axis=0),self.gamma,self.gae_lambda,self.n_steps,self.num_envs)
-
                     b_return = b_advantage + b_value
 
                     s_m = torch.tensor(b_state_maps).flatten(0,2)
@@ -212,6 +224,11 @@ class jax_Luxai_Worker(mp.Process) :
                     print(f'worker {self.worker_id} complete step n°{queue_cpt} at speed of {round((self.n_steps*self.num_envs)/(time.time()-start),1)}it/s')
                     self.queue.put((s_m,s_f,ac,ad,re,lo,m_a,m_x,m_y,u_m))
                     start = time.time()
+
+                    intermediate_reward = torch.tensor(jnp.sum(cumulated_points,axis=0)/(2*(step+1)))
+
+                    self.intermediate_reward.put(intermediate_reward)
+        
 
                     steps_cpt = 0
                     b_state_maps = jnp.zeros((self.n_steps,2,self.num_envs,n_inputs_maps,map_width,map_height),dtype=jnp.float32)

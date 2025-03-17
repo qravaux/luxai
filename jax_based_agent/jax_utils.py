@@ -4,10 +4,11 @@ import torch
 import jax
 import jax.numpy as jnp
 import jax.nn as nn
+import matplotlib.pyplot as plt
 from src.luxai_s3.params import EnvParams, env_params_ranges
 
 class PrioritizedReplayBuffer:
-    def __init__(self, capacity,device, alpha=0.6):
+    def __init__(self, capacity,device, alpha=0):
         self.capacity = capacity
         self.alpha = alpha
         self.position = 0
@@ -88,7 +89,7 @@ class PrioritizedReplayBuffer:
         if self.len_cpt < self.capacity :
             self.len_cpt = min(n_add + self.len_cpt,self.capacity)
 
-    def sample(self, batch_size, device, beta=0.4):
+    def sample(self, batch_size, device, beta=0):
         if self.len_cpt == self.capacity:
             prios = self.priorities
         else:
@@ -120,7 +121,7 @@ class PrioritizedReplayBuffer:
     
     def update_priorities(self, batch_indices, batch_priorities):
 
-        self.priorities[batch_indices] = batch_priorities
+        self.priorities[batch_indices] = torch.clamp(batch_priorities,min=1/self.capacity)
 
 def obs_to_state(obs,ep_params,points,map_memory,player):
 
@@ -143,46 +144,45 @@ def obs_to_state(obs,ep_params,points,map_memory,player):
     
     relic_nodes_mask = jnp.where(obs.relic_nodes_mask,1,0)
     for i, (x,y) in enumerate(obs.relic_nodes) :
-        state_maps = state_maps.at[6,x,y].add(relic_nodes_mask[i])
-        state_maps = state_maps.at[6, 23-y,23-x].add(relic_nodes_mask[i])
-    
+        state_maps = jnp.clip(state_maps.at[6,x,y].add(relic_nodes_mask[i]),max=1)
+        state_maps = jnp.clip(state_maps.at[6, 23-y,23-x].add(relic_nodes_mask[i]),max=1)
+
     if player == 'player_0' :
         units_mask = jnp.where(obs.units_mask[0],1,0)
         for i, (x,y) in enumerate(obs.units.position[0]) :
-            state_maps = state_maps.at[x,y].set(units_mask[i])
+            state_maps = jnp.clip(state_maps.at[7,x,y].add(units_mask[i]),max=1)
     else :
         position_player_1 = obs.units.position[::-1,:,::-1]
         position_player_1 = jnp.where(position_player_1==-1,-1,23-position_player_1)
         units_mask = jnp.where(obs.units_mask[1],1,0)
         for i, (x,y) in enumerate(position_player_1[0]) :
-            state_maps = state_maps.at[x,y].set(units_mask[i])
-    
+            state_maps = jnp.clip(state_maps.at[7,x,y].add(units_mask[i]),max=1)
+
+
     step_match = obs.match_steps
     n_match = jnp.sum(obs.team_wins)
     n_relic = jnp.sum(state_maps[6])
 
     # Compute memory map
     state_maps = state_maps.at[3].set(state_maps[0] + (1 - state_maps[0]) * jnp.flip(state_maps[0],axis=[-2,-1]).T)  # Because the map is symmetric
-    state_maps = state_maps.at[4].set(state_maps[1] + (1 - state_maps[0]) * jnp.flip(state_maps[1],axis=[-2,-1]).T)
-    state_maps = state_maps.at[5].set(state_maps[2] + (1 - state_maps[0]) * jnp.flip(state_maps[2],axis=[-2,-1]).T)
+    state_maps = state_maps.at[4].set(state_maps[0] * state_maps[1] + (1 - state_maps[0]) * jnp.flip(state_maps[1],axis=[-2,-1]).T)
+    state_maps = state_maps.at[5].set(state_maps[0] * state_maps[2] + (1 - state_maps[0]) * jnp.flip(state_maps[2],axis=[-2,-1]).T)
 
     begin_match = jnp.where(step_match==0,1,0)
-    map_memory = map_memory.at[3].set(1-begin_match)
+    map_memory = map_memory.at[3].multiply(1-begin_match)
 
-    find_all_relics = jnp.where(n_relic==6,1,0) + jnp.where(n_relic==((n_match + 1)*2),1,0)
-    map_memory = jnp.clip(map_memory.at[3].add(find_all_relics),max=1)
+    state_maps = state_maps.at[4].set(state_maps[3] * state_maps[4] + (1 - state_maps[3]) * map_memory[4])  # Add memory
+    state_maps = state_maps.at[5].set(state_maps[3] * state_maps[5] + (1 - state_maps[3]) * map_memory[5])
+    state_maps = state_maps.at[3].set(state_maps[3] + (1 - state_maps[3]) * map_memory[3])
 
-    state_maps = state_maps.at[4].set(state_maps[4] + (1 - state_maps[3]) * map_memory[4])  # Add memory
-    state_maps = state_maps.at[5].set(state_maps[5] + (1 - state_maps[3]) * map_memory[5])
-    state_maps = state_maps.at[3].set(map_memory[3] + (1 - map_memory[3]) * state_maps[3])
+    find_all_relics = jnp.clip(jnp.where(n_relic==6,1,0) + jnp.where(n_relic==((n_match + 1)*2),1,0),max=1)
+    reset_point_prob = 1 - jnp.clip(jnp.where(n_match >= 3,1,0)*jnp.where(step_match > 0,1,0) + find_all_relics,max=1)
 
-    reset_point_prob = 1 - (jnp.where(n_match >= 3,1,0)*jnp.where(step_match > 0,1,0) + find_all_relics)
+    map_memory = map_memory.at[9].set(jnp.where(map_memory[9] == 0, -1, map_memory[9])*reset_point_prob + map_memory[9]*(1-reset_point_prob))
+    map_relic = state_maps[6] + (1 - state_maps[0])*reset_point_prob + (1 - state_maps[3])*(1-reset_point_prob)*(1-find_all_relics)
 
-    map_memory = map_memory.at[9].set(jnp.where(map_memory[9] == 0, -2, map_memory[9])*reset_point_prob)
-    map_relic = state_maps[6] + (1 - state_maps[0])*reset_point_prob + (1 - state_maps[3])*(1-reset_point_prob)
-
-    state_maps = state_maps.at[8].set(jnp.clip(jax.scipy.signal.convolve2d(map_relic, jnp.ones((5, 5)), mode="same", boundary="fill", fillvalue=0), a_max=1))
-    state_maps = state_maps.at[8].set(state_maps[8] * jnp.where(map_memory[9] != 0, 1, 0))
+    state_maps = state_maps.at[8].set(jnp.clip(jax.scipy.signal.convolve2d(map_relic, jnp.ones((5, 5)), mode="same", boundary="fill", fillvalue=0), max=1))
+    state_maps = state_maps.at[8].set(state_maps[8] * jnp.where(map_memory[9]!=0, 1, 0))
 
     question = state_maps[8] * state_maps[7]
     old_prob = map_memory[9] * state_maps[8]
@@ -209,6 +209,9 @@ def obs_to_state(obs,ep_params,points,map_memory,player):
         list_state_features.append(obs.team_points.flatten() / 3000)  # team_points
         list_state_features.append(obs.team_wins.flatten() / 5)  # team_wins
 
+        list_state_features.append(obs.relic_nodes.flatten() / map_width)  # relic_nodes
+        list_state_features.append(jnp.where(obs.relic_nodes_mask,1,0).flatten())  # relic_nodes_mask 
+
     else :
         # Units
         list_state_features.append(position_player_1.flatten() / map_width)  # position
@@ -219,8 +222,10 @@ def obs_to_state(obs,ep_params,points,map_memory,player):
         list_state_features.append(obs.team_points[::-1].flatten() / 3000)  # team_points
         list_state_features.append(obs.team_wins[::-1].flatten() / 5)  # team_wins
 
-    list_state_features.append(obs.relic_nodes.flatten() / map_width)  # relic_nodes
-    list_state_features.append(jnp.where(obs.relic_nodes_mask,1,0).flatten())  # relic_nodes_mask 
+        relic_nodes_coords = obs.relic_nodes.reshape(2,3,2)[::-1,:,::-1]
+        relic_nodes_coords = jnp.where(relic_nodes_coords==-1,-1,23-relic_nodes_coords)
+        list_state_features.append(relic_nodes_coords.flatten() / map_width)  # relic_nodes
+        list_state_features.append(jnp.where(obs.relic_nodes_mask.reshape(2,3)[::-1],1,0).flatten())  # relic_nodes_mask 
 
     list_state_features.append(obs.steps.flatten() / 505)  # steps
     list_state_features.append(obs.match_steps.flatten() / 101)  # match_steps
@@ -247,7 +252,7 @@ def random_params(rng_key) :
 def generate_map_memory(num_envs) :
     map_memory = jnp.zeros((num_envs, 10, 24, 24), dtype=jnp.float32)
     map_memory = map_memory.at[:,5].set(-1)
-    map_memory = map_memory.at[:,4].set(-1)
+    map_memory = map_memory.at[:,4].set(-1) / 20
     map_memory = map_memory.at[:,9].set(-1)
 
     points = jnp.zeros((num_envs,1), dtype=jnp.float32)
@@ -279,7 +284,6 @@ def compute_mask_actions_log_probs(obs,ep_params,action_key,actor_action,actor_d
     sap_mask = jnp.where(obs.units.energy[player_id]<ep_params.unit_sap_cost,1,0)
 
     #Compute action masks
-    """
     mask_action = jnp.zeros((n_units,n_action),dtype=jnp.int32)
     mask_dx = jnp.zeros((n_units,max_sap_range*2+1),dtype=jnp.int32)
     mask_dy = jnp.zeros((n_units,max_sap_range*2+1),dtype=jnp.int32)
@@ -292,7 +296,7 @@ def compute_mask_actions_log_probs(obs,ep_params,action_key,actor_action,actor_d
     mask_action = mask_action.at[:,0].set(0)
     mask_dx = mask_dx.at[0].set(0)
     mask_dx = mask_dx.at[0].set(0)
-
+    """
     mask_action = mask_action.at[:,1:].add(energy_mask)
     mask_action = mask_action.at[:,-1].add(sap_mask)
 
@@ -301,7 +305,10 @@ def compute_mask_actions_log_probs(obs,ep_params,action_key,actor_action,actor_d
     target_tiles = jnp.repeat(jnp.expand_dims(position,axis=-2),4,axis=-2) + directions
 
     clamp_target_tiles = jnp.clip(target_tiles,min=0,max=23).reshape(n_units*4,2)
-    target_tiles_type = obs.map_features.tile_type[clamp_target_tiles[:,0],clamp_target_tiles[:,1]].reshape(n_units,4)
+    if player == 'player_0' :
+        target_tiles_type = obs.map_features.tile_type[clamp_target_tiles[:,0],clamp_target_tiles[:,1]].reshape(n_units,4)
+    else :
+        target_tiles_type = obs.map_features.tile_type[23-clamp_target_tiles[:,1],23-clamp_target_tiles[:,0]].reshape(n_units,4)
 
     out_board_tiles = jnp.where(target_tiles<0,1,0) + jnp.where(target_tiles>23,1,0)
     forbidden_move = out_board_tiles[:,:,0] + out_board_tiles[:,:,1] + jnp.where(target_tiles_type==2,1,0)
@@ -380,23 +387,32 @@ def compute_target_distance_matrix(state,obs,player) :
     units_mask = jnp.where(obs[player].units_mask[player_idx],0,1)
     unit_patch = jnp.ones((24,24),dtype=jnp.int32)
     for i, (x,y) in enumerate(obs[player].units.position[player_idx]) :
-        unit_patch = unit_patch.at[x,y].set(units_mask[i])
+        unit_patch = unit_patch.at[x,y].multiply(units_mask[i])
+    carrot = 1 - jnp.clip(jnp.sum(target),max=1)
+
+    target = target.at[6,17].set(carrot)
+    target = target.at[17,6].set(carrot)
+    target = target.at[0,23].set(carrot)
+    target = target.at[23,0].set(carrot)
+    target = target.at[11,12].set(carrot)
+    target = target.at[12,11].set(carrot)
 
     return min_manhattan_dist(target*unit_patch), target
         
 def compute_reward(obs,previous_obs,ep_params,action,new_distance,distance,target,player) :
     player_idx = jnp.where(player=='player_1',1,0)
     units_mask = jnp.where(obs[player].units_mask[player_idx],1,0)
+    previous_units_mask = jnp.where(previous_obs[player].units_mask[player_idx],1,0)
     reward = -jnp.ones(16,dtype=jnp.int32) * jnp.where(obs[player].units.energy[player_idx]<ep_params.unit_move_cost,1,0) / 505
     delta_distance = new_distance - distance
-    reward = reward - units_mask*(jnp.where(jnp.abs(delta_distance)>1,0,delta_distance)/(24*24)) * jnp.where(obs[player].match_steps==0,0,1)
+    reward = reward - previous_units_mask * units_mask*(jnp.where(jnp.abs(delta_distance)>1,0,delta_distance)/(24*24)) * jnp.where(obs[player].match_steps==0,0,1)
     
     for i, (x,y) in enumerate(obs[player].units.position[player_idx]) :
-        reward = reward.at[i].add(target[x,y]*units_mask[i]/20)
-        target = target.at[x,y].set(1-units_mask[i])
+        reward = reward.at[i].add(target[x,y]*units_mask[i]/50)
+        target = target.at[x,y].multiply(1-units_mask[i])
 
     delta_energy = (obs[player].units.energy[player_idx] - previous_obs[player].units.energy[player_idx]) * jnp.where(previous_obs[player].units.energy[player_idx]>=0,1,0)
-    reward = reward + units_mask * (delta_energy/(20000*jnp.log(jnp.clip(obs[player].units.energy[player_idx],min=2)))) * jnp.where(obs[player].match_steps==0,0,1)
+    reward = reward + previous_units_mask * units_mask * (delta_energy/(6000*jnp.log(jnp.clip(obs[player].units.energy[player_idx],min=2)))) * jnp.where(obs[player].match_steps==0,0,1)
     reward = reward - units_mask * jnp.where(obs[player].units.energy[player_idx]<0,1,0)/50
 
     allies_position = obs[player].units.position[player_idx]
@@ -499,13 +515,15 @@ def obs_to_state_dict(obs,ep_params,points,map_memory,player):
     if player == 'player_0' :
         units_mask = jnp.where(obs['units_mask'][0],1,0)
         for i, (x,y) in enumerate(obs['units']['position'][0]) :
-            state_maps = state_maps.at[x,y].set(units_mask[i])
+            state_maps = jnp.clip(state_maps.at[x,y].add(units_mask[i]),max=1)
+        
     else :
         position_player_1 = obs['units']['position'][::-1,:,::-1]
         position_player_1 = jnp.where(position_player_1==-1,-1,23-position_player_1)
         units_mask = jnp.where(obs['units_mask'][1],1,0)
         for i, (x,y) in enumerate(position_player_1[0]) :
-            state_maps = state_maps.at[x,y].set(units_mask[i])
+            state_maps = jnp.clip(state_maps.at[x,y].add(units_mask[i]),max=1)
+    
     
     step_match = obs['match_steps']
     n_match = jnp.sum(obs['team_wins'])

@@ -20,11 +20,11 @@ if __name__ == "__main__":
     num_envs = 333
     num_workers = 3
 
-    lr = 1e-12
-    lr_decay = 0.99
+    lr = 1e-3
+    lr_decay = 0.999
     max_norm = 0.5
     entropy_coef = 0.001
-    weight_decay = 0
+    weight_decay = 0.001
     eps = 1e-8
     betas = (0.9,0.999)
     lmbda = lambda epoch: lr_decay
@@ -34,13 +34,13 @@ if __name__ == "__main__":
     vf_coef = 0.5
     gamma = 0.995
     gae_lambda = 0.99
-    save_rate = 3
+    save_rate = 10
 
     n_epochs = int(1e9)
     n_steps = 101
     n_batch = ((num_envs*n_steps) // batch_size)
 
-    file_name = 'separated_unit_networks'
+    file_name = 'test_1_episode'
     save_dir = f"policy/{file_name}"
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -52,9 +52,10 @@ if __name__ == "__main__":
     policy_gpu.load_state_dict(policy.state_dict())
     policy_gpu.to(device)
     policy.share_memory()
-    queue = mp.Queue(maxsize=num_envs)
-    reward_queue = mp.Queue(maxsize=num_envs)
-    point_queue = mp.Queue(maxsize=num_envs)
+    queue = mp.Queue(maxsize=num_workers)
+    reward_queue = mp.Queue(maxsize=num_workers)
+    point_queue = mp.Queue(maxsize=num_workers)
+    intermediate_reward = mp.Queue(maxsize=num_workers)
 
     optimizer = torch.optim.Adam(policy_gpu.parameters(), lr=lr, weight_decay=weight_decay, eps=eps, betas=betas)
     scheduler = torch.optim.lr_scheduler.MultiplicativeLR(optimizer,lmbda)
@@ -75,6 +76,7 @@ if __name__ == "__main__":
                                 queue,
                                 reward_queue,
                                 point_queue,
+                                intermediate_reward,
                                 num_envs,
                                 num_workers,
                                 gamma, 
@@ -95,6 +97,7 @@ if __name__ == "__main__":
     print('Start training...\n')
 
     reward_cpt = 0
+    int_rew_cpt = 0
 
     for epoch in range(n_epochs):
 
@@ -125,6 +128,13 @@ if __name__ == "__main__":
                 writer.add_scalar("Point 0", point[0,ev].item(), reward_cpt)
                 writer.add_scalar("Point 1", point[1,ev].item(), reward_cpt)
 
+        while intermediate_reward.qsize() > 0 :
+            int_rew = intermediate_reward.get()
+            for ev in range(num_envs) :
+                int_rew_cpt += n_steps
+                writer.add_scalar("Intermediate reward",int_rew[ev].item(), int_rew_cpt)
+               
+
         #Train policy
         for _ in range(n_batch) :
 
@@ -132,13 +142,13 @@ if __name__ == "__main__":
 
             #Compute log_probs and values
             values_,log_probs_ = policy_gpu.training_forward(states_maps_,states_features_,actions_,mask_actions_,mask_dxs_,mask_dys_)
-            advantages_ = (advantages_ - torch.mean(advantages_,dim=0)) / (torch.std(advantages_,dim=0) + 1e-8)
-            returns_ = (returns_ - torch.mean(returns_,dim=0)) / (torch.std(returns_,dim=0) + 1e-8)
+            #advantages_ = (advantages_ - torch.mean(advantages_,dim=0)) / (torch.std(advantages_,dim=0) + 1e-8)
+            #returns_ = (returns_ - torch.mean(returns_,dim=0)) / (torch.std(returns_,dim=0) + 1e-8)
         
             # Losses
-            entropy_loss = -torch.mean(weights_*torch.sum(units_mask_ * torch.exp(log_probs_) * log_probs_,dim=-1))
-            policy_loss = -torch.mean(weights_*torch.sum(units_mask_ * log_probs_ * advantages_,dim=-1))
-            value_loss = torch.mean(weights_*torch.sum(units_mask_ * torch.pow(values_ - returns_,2),dim=-1))
+            entropy_loss = -torch.mean(weights_*torch.mean(units_mask_ * torch.exp(log_probs_) * log_probs_,dim=-1))
+            policy_loss = -torch.mean(weights_*torch.mean(units_mask_ * log_probs_ * advantages_,dim=-1))
+            value_loss = torch.mean(weights_*torch.mean(units_mask_ * torch.pow(values_ - returns_,2),dim=-1))
 
             loss = policy_loss + vf_coef *value_loss + entropy_coef * entropy_loss
 
@@ -148,7 +158,7 @@ if __name__ == "__main__":
             torch.nn.utils.clip_grad_norm_(policy.parameters(), max_norm=max_norm)
             optimizer.step()
 
-            buffer.update_priorities(batch_indices=indices_,batch_priorities=torch.abs(torch.sum(advantages_+values_,dim=-1)).detach())
+            buffer.update_priorities(batch_indices=indices_,batch_priorities=torch.clamp(torch.sum(advantages_,dim=-1),min=1e-8).detach())
 
         scheduler.step()
         policy.load_state_dict(policy_gpu.state_dict())

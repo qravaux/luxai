@@ -20,7 +20,7 @@ class Agent():
         self.policy = jax_Luxai_Agent()
         self.rng = jax.random.key(0)
 
-        self.policy.load_state_dict(torch.load("../../policy/jax_norm_3_worker_1e-10_A2C/policy_step_501.pth", weights_only=True))
+        self.policy.load_state_dict(torch.load("../../jax_based_agent/policy/separated_unit_networks_rng/policy_step_117.pth", weights_only=True))
 
     def act(self, step: int, obs, remainingOverageTime: int = 60):
         obs = to_jax(flax.serialization.to_state_dict(obs))

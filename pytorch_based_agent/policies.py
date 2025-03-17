@@ -164,17 +164,17 @@ class Luxai_Agent(nn.Module) :
 
         #Compute memory map
         state_maps[3] = state_maps[0] + (1-state_maps[0]) * torch.rot90(state_maps[0],2).T #Because the map is symetric
-        state_maps[4] = state_maps[1] + (1-state_maps[0]) * torch.rot90(state_maps[1],2).T
-        state_maps[5] = state_maps[2] + (1-state_maps[0]) * torch.rot90(state_maps[2],2).T
+        state_maps[4] = state_maps[0] * state_maps[1] + (1-state_maps[0]) * torch.rot90(state_maps[1],2).T
+        state_maps[5] = state_maps[0] * state_maps[2] + (1-state_maps[0]) * torch.rot90(state_maps[2],2).T
 
         if (step_match == 0) :
             map_memory[3] = 0
         if (n_relic == self.max_relic_nodes) or (n_relic == (n_match+1)*2) :
             map_memory[3] = 1
 
-        state_maps[4] = state_maps[4] + (1-state_maps[3]) * map_memory[4] #Add memory
-        state_maps[5] = state_maps[5] + (1-state_maps[3]) * map_memory[5]
-        state_maps[3] = map_memory[3] + (1-map_memory[3]) * state_maps[3]
+        state_maps[4] = state_maps[3] * state_maps[4] + (1-state_maps[3]) * map_memory[4] #Add memory
+        state_maps[5] = state_maps[3] * state_maps[5] + (1-state_maps[3]) * map_memory[5]
+        state_maps[3] = state_maps[3] + (1-state_maps[3]) * map_memory[3]
 
         if not (((n_match >= 3) and (step_match>0)) or (n_relic == (n_match+1)*2) or (n_relic==self.max_relic_nodes)) :
             map_memory[9] = torch.where(map_memory[9]==0,-1,map_memory[9])

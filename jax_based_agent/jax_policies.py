@@ -18,14 +18,14 @@ class jax_Luxai_Agent(nn.Module) :
         self.map_height = 24
         self.map_width = 24
 
-        self.actor_size = [2048,1024,512,256]
-        self.cnn_channels = [16,32,64]
+        self.actor_size = [1024,512,256]
+        self.cnn_channels = [8,16,32]
         self.cnn_kernels = [9,5,3]
         self.cnn_strides = [1,1,1]
-        self.critic_size = [2048,1024,512,256]
+        self.critic_size = [1024,512,256]
         
         self.final_activation = nn.Tanh()
-        self.activation = nn.Softplus() #nn.ReLU(), to try ELU, Softplus
+        self.activation = nn.ReLU() #nn.ReLU(), to try ELU, Softplus
         self.gain = math.sqrt(2) # 5/3 For Tanh and sqrt(2) for ReLU
 
         self.max_pooling = nn.MaxPool2d(kernel_size=2)
@@ -73,12 +73,12 @@ class jax_Luxai_Agent(nn.Module) :
         self.hidden_actor = nn.ModuleList([nn.Linear(self.actor_size[i],self.actor_size[i+1],dtype=torch.float32) for i in range(len(self.actor_size)-1)])
 
         self.actor_action_layer = nn.ModuleList([nn.Linear(self.actor_size[-1],self.n_action,dtype=torch.float32) for _ in range(self.n_units)])
-        self.actor_dx_layer = nn.ModuleList([nn.Linear(self.actor_size[-1],(self.max_sap_range*2+1),dtype=torch.float32) for _ in range(self.n_units)])
-        self.actor_dy_layer = nn.ModuleList([nn.Linear(self.actor_size[-1],(self.max_sap_range*2+1),dtype=torch.float32) for _ in range(self.n_units)])
+        self.actor_dx_layer = nn.ModuleList([nn.Linear(self.actor_size[-1],self.max_sap_range*2+1,dtype=torch.float32) for _ in range(self.n_units)])
+        self.actor_dy_layer = nn.ModuleList([nn.Linear(self.actor_size[-1],self.max_sap_range*2+1,dtype=torch.float32) for _ in range(self.n_units)])
 
         self.inputs_critic = nn.Linear(self.n_inputs_features,self.critic_size[0],dtype=torch.float32)
         self.hidden_critic = nn.ModuleList([nn.Linear(self.critic_size[i],self.critic_size[i+1],dtype=torch.float32) for i in range(len(self.critic_size)-1)])
-        self.outputs_critic = nn.ModuleList([nn.Linear(self.critic_size[-1],self.n_units,dtype=torch.float32) for _ in range(self.n_units)])
+        self.outputs_critic = nn.ModuleList([nn.Linear(self.critic_size[-1],1,dtype=torch.float32) for _ in range(self.n_units)])
 
         #Initialization
         nn.init.orthogonal_(self.cnn_inputs_actor.weight,gain=self.gain)
@@ -170,7 +170,7 @@ class jax_Luxai_Agent(nn.Module) :
             value_output = []
             for critic_unit in self.outputs_critic :
                 value_output.append(critic_unit(x))
-            value = torch.stack(value_output,dim=-2)
+            value = torch.stack(value_output,dim=-2).view(-1,self.n_units)
 
             actor_action = jnp.array(actor_action.cpu(),dtype=jnp.float32)
             actor_dx = jnp.array(actor_dx.cpu(),dtype=jnp.float32)
@@ -234,7 +234,7 @@ class jax_Luxai_Agent(nn.Module) :
         value_output = []
         for critic_unit in self.outputs_critic :
             value_output.append(critic_unit(x))
-        value = torch.stack(value_output,dim=-2)
+        value = torch.stack(value_output,dim=-2).view(-1,self.n_units)
 
         return value,log_prob
     
